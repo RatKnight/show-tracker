@@ -1,4 +1,8 @@
 // The part that runs around the clock: keeps schedules fresh and raises alerts.
+//
+// Schedules live once in a shared catalog; each user holds only the keys of the
+// shows they track plus their own alerts, watched marks and settings. Every
+// function that touches personal data takes the user it acts for.
 import { collectAlerts, myStreams } from '../app/js/core.js';
 import { computeDiscover } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
@@ -12,68 +16,116 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
   const { data } = store;
   let refreshing = null;
   let lastAttempt = 0;
-  let discovering = null;
-  let lastDiscoverAttempt = 0;
+  const discovering = new Map(); // user id -> in-flight promise
+  const discoverAttempt = new Map(); // user id -> time of last try
 
-  const fetchOne = async (source, id) => {
-    if (source === 'anilist') return (await sources.fetchAnime([id], now()))[0] || null;
-    if (source === 'tvmaze') return sources.fetchTv(id, now());
-    return null;
-  };
+  const users = () => Object.values(data.users);
 
-  async function checkAlerts() {
-    const fresh = collectAlerts(Object.values(data.shows), new Set(data.alerted), now());
+  /** A user's tracked shows: catalog entries stamped with when they added them. */
+  const showsOf = (u) =>
+    Object.entries(u.shows)
+      .filter(([key]) => data.catalog[key])
+      .map(([key, { addedAt }]) => ({ ...data.catalog[key], addedAt }));
+
+  /** Drop catalog entries nobody tracks any more. */
+  function pruneCatalog() {
+    const wanted = new Set(users().flatMap((u) => Object.keys(u.shows)));
+    for (const key of Object.keys(data.catalog)) if (!wanted.has(key)) delete data.catalog[key];
+  }
+
+  const snapshotOf = (show) => ({ key: show.key, title: show.title, image: show.image, url: show.url, streams: show.streams, kind: show.kind });
+
+  function pushAlert(u, entry) {
+    u.alerts.unshift(entry);
+    u.alerts.length = Math.min(u.alerts.length, MAX_ALERTS);
+  }
+
+  async function sendNow(u, messages) {
+    const errors = await send(u.settings, messages);
+    if (errors.length) {
+      u.lastError = `Alert delivery failed — ${errors.join('; ')}`;
+      store.save();
+    }
+  }
+
+  /** Hold messages for delivery; muted shows are dropped here. */
+  function queue(u, messages) {
+    const wanted = messages.filter((m) => !u.muted.includes(m.showKey));
+    if (!wanted.length) return;
+    u.outbox.push(...wanted.map(({ showKey, ...m }) => m));
+    u.outbox = u.outbox.slice(-200);
+    store.save();
+  }
+
+  /** Send what is waiting, unless quiet hours or the digest schedule say to hold it. */
+  async function flush(u) {
+    const s = u.settings;
+    const { hour, day } = localClock(now(), s.timeZone);
+    if (inQuietHours(hour, s.quietStart, s.quietEnd)) return;
+    const digest = s.alertMode === 'digest';
+    if (digest) {
+      // One send per day, at the first check on or after the chosen hour.
+      if (hour < s.digestHour || u.lastDigestDay === day) return;
+      u.lastDigestDay = day;
+      store.save();
+    }
+    if (!u.outbox.length) return;
+    const batch = u.outbox.splice(0);
+    store.save();
+    await sendNow(u, batch.length > 1 && (digest || batch.length > 5) ? [summarize(batch)] : batch);
+  }
+
+  async function checkAlerts(u) {
+    const fresh = collectAlerts(showsOf(u), new Set(u.alerted), now());
     if (!fresh.length) return [];
     for (const { show, ep } of fresh) {
-      data.alerted.push(ep.id);
-      pushAlert({
-        showKey: show.key,
-        // Snapshot so the alert still renders if the show is removed later.
-        show: { key: show.key, title: show.title, image: show.image, url: show.url, streams: show.streams, kind: show.kind },
-        ep,
-        read: false,
-      });
+      u.alerted.push(ep.id);
+      // The show is snapshotted so the alert still renders if it is removed later.
+      pushAlert(u, { showKey: show.key, show: snapshotOf(show), ep, read: false });
     }
-    data.alerted = data.alerted.slice(-2000);
+    u.alerted = u.alerted.slice(-2000);
     store.save();
 
-    const messages = fresh.map(({ show, ep }) => {
-      const mine = myStreams(show, data.settings.services);
-      const where = mine.map((s) => s.name).join(', ');
-      return {
-        title: show.title,
-        body: `${ep.label}${ep.name && ep.name !== ep.label ? ` “${ep.name}”` : ''} is out${where ? ` on ${where}` : ''}`,
-        url: mine[0]?.url || show.url,
-        image: show.image,
-        at: ep.airsAt,
-        showKey: show.key,
-      };
-    });
-    queue(messages);
-    await flush();
+    queue(
+      u,
+      fresh.map(({ show, ep }) => {
+        const mine = myStreams(show, u.settings.services);
+        const where = mine.map((s) => s.name).join(', ');
+        return {
+          title: show.title,
+          body: `${ep.label}${ep.name && ep.name !== ep.label ? ` “${ep.name}”` : ''} is out${where ? ` on ${where}` : ''}`,
+          url: mine[0]?.url || show.url,
+          image: show.image,
+          at: ep.airsAt,
+          showKey: show.key,
+        };
+      }),
+    );
+    await flush(u);
     return fresh;
   }
 
   /** Heads-up shortly before an episode airs, when the user asked for one. */
-  async function checkReminders() {
-    const lead = (data.settings.remindMinutes || 0) * 60 * 1000;
+  async function checkReminders(u) {
+    const lead = (u.settings.remindMinutes || 0) * 60 * 1000;
     if (!lead) return;
-    const done = new Set(data.reminded);
+    const done = new Set(u.reminded);
     const due = [];
-    for (const show of Object.values(data.shows)) {
+    for (const show of showsOf(u)) {
       for (const ep of show.episodes) {
         if (ep.dateOnly || done.has(ep.id) || ep.airsAt <= now() || ep.airsAt - lead > now()) continue;
-        data.reminded.push(ep.id);
-        if (!data.muted.includes(show.key)) due.push({ show, ep });
+        u.reminded.push(ep.id);
+        if (!u.muted.includes(show.key)) due.push({ show, ep });
       }
     }
     if (!due.length) return;
-    data.reminded = data.reminded.slice(-2000);
+    u.reminded = u.reminded.slice(-2000);
     store.save();
     // Reminders are only useful right now, so they skip the digest but respect quiet hours.
-    const { hour } = localClock(now(), data.settings.timeZone);
-    if (inQuietHours(hour, data.settings.quietStart, data.settings.quietEnd)) return;
+    const { hour } = localClock(now(), u.settings.timeZone);
+    if (inQuietHours(hour, u.settings.quietStart, u.settings.quietEnd)) return;
     await sendNow(
+      u,
       due.map(({ show, ep }) => ({
         title: show.title,
         body: `${ep.label} airs in ${Math.max(1, Math.round((ep.airsAt - now()) / 60000))} minutes`,
@@ -84,72 +136,28 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     );
   }
 
-  /** Hold messages for delivery; muted shows are dropped here. */
-  function queue(messages) {
-    const wanted = messages.filter((m) => !data.muted.includes(m.showKey));
-    if (!wanted.length) return;
-    data.outbox.push(...wanted.map(({ showKey, ...m }) => m));
-    data.outbox = data.outbox.slice(-200);
-    store.save();
-  }
-
-  /** Send what is waiting, unless quiet hours or the digest schedule say to hold it. */
-  async function flush() {
-    const s = data.settings;
-    const { hour, day } = localClock(now(), s.timeZone);
-    if (inQuietHours(hour, s.quietStart, s.quietEnd)) return;
-    const digest = s.alertMode === 'digest';
-    if (digest) {
-      // One send per day, at the first check on or after the chosen hour.
-      if (hour < s.digestHour || data.lastDigestDay === day) return;
-      data.lastDigestDay = day;
-      store.save();
-    }
-    if (!data.outbox.length) return;
-    const batch = data.outbox.splice(0);
-    store.save();
-    await sendNow(batch.length > 1 && (digest || batch.length > 5) ? [summarize(batch)] : batch);
-  }
-
-  function pushAlert(entry) {
-    data.alerts.unshift(entry);
-    data.alerts.length = Math.min(data.alerts.length, MAX_ALERTS);
-  }
-
-  async function sendNow(messages) {
-    const errors = await send(data.settings, messages);
-    if (errors.length) {
-      data.lastError = `Alert delivery failed — ${errors.join('; ')}`;
-      store.save();
-    }
-  }
-
   /**
-   * Rebuild the Discover suggestions. Unless `silent`, a new season that was not
-   * known before raises an alert.
+   * Rebuild one user's Discover suggestions. Unless `silent`, a new season that
+   * was not known before raises an alert.
    */
-  async function doDiscover(silent) {
-    // The very first run only records what already exists, so installing or
-    // upgrading does not fire an alert for every season already announced.
-    silent ||= !data.discover;
-    const found = await computeDiscover({ shows: Object.values(data.shows), sources, now: now() });
-    const known = new Set(data.seenSequels);
+  async function doDiscover(u, silent) {
+    // The very first run only records what already exists, so a new account does
+    // not get an alert for every season already announced.
+    silent ||= !u.discover;
+    const found = await computeDiscover({ shows: showsOf(u), sources, now: now() });
+    const known = new Set(u.seenSequels);
     const news = found.sequels.filter((s) => s.fresh && !known.has(s.key));
-    data.seenSequels = [...new Set([...data.seenSequels, ...found.sequels.map((s) => s.key)])].slice(-5000);
-    data.discover = { ...found, updatedAt: now() };
+    u.seenSequels = [...new Set([...u.seenSequels, ...found.sequels.map((s) => s.key)])].slice(-5000);
+    u.discover = { ...found, updatedAt: now() };
     if (!silent) {
       for (const s of news) {
-        pushAlert({
-          showKey: s.key,
-          show: { key: s.key, title: s.title, image: s.image, url: s.url, streams: s.streams, kind: s.kind },
-          ep: { id: `season:${s.key}`, label: `New season of ${s.from}`, airsAt: now() },
-          read: false,
-        });
+        pushAlert(u, { showKey: s.key, show: snapshotOf(s), ep: { id: `season:${s.key}`, label: `New season of ${s.from}`, airsAt: now() }, read: false });
       }
     }
     store.save();
     if (!silent && news.length) {
       queue(
+        u,
         news.map((s) => ({
           title: s.title,
           body: `New season of ${s.from} ${s.status === 'Airing' ? 'is airing' : 'announced'}${s.note ? ` — ${s.note.toLowerCase()}` : ''}`,
@@ -158,27 +166,31 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
           at: now(),
         })),
       );
-      await flush();
+      await flush(u);
     }
   }
 
-  function refreshDiscover({ silent = false } = {}) {
-    discovering ||= doDiscover(silent).finally(() => {
-      discovering = null;
-    });
-    return discovering;
+  function refreshDiscover(u, { silent = false } = {}) {
+    if (!discovering.has(u.id)) {
+      discovering.set(
+        u.id,
+        doDiscover(u, silent).finally(() => discovering.delete(u.id)),
+      );
+    }
+    return discovering.get(u.id);
   }
-  const discoverSoon = () => {
-    refreshDiscover({ silent: true }).catch((e) => console.error('Discover refresh failed:', e.message));
+  const discoverSoon = (u) => {
+    refreshDiscover(u, { silent: true }).catch((e) => console.error('Discover refresh failed:', e.message));
   };
 
+  /** Re-fetch every catalog entry, then check everyone's alerts. */
   async function doRefresh() {
     const failures = [];
     const keep = (fresh) => {
-      const old = fresh && data.shows[fresh.key];
-      if (old) data.shows[fresh.key] = { ...fresh, addedAt: old.addedAt };
+      if (fresh && data.catalog[fresh.key]) data.catalog[fresh.key] = fresh;
     };
-    const current = Object.values(data.shows);
+    pruneCatalog();
+    const current = Object.values(data.catalog);
     const animeIds = current.filter((s) => s.source === 'anilist').map((s) => s.id);
     if (animeIds.length) {
       try {
@@ -201,64 +213,71 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       data.lastRefresh = now();
     }
     store.save();
-    await checkAlerts();
+    for (const u of users()) await checkAlerts(u);
   }
 
   /**
-   * Add several shows at once (list import, restore). `wanted` is
-   * [{ source, id, addedAt? }]; returns how many were new.
+   * Track several shows at once for a user. `wanted` is [{ source, id, addedAt? }];
+   * returns how many were new to them. Shows someone else already tracks are
+   * reused from the catalog without another fetch.
    */
-  async function addMany(wanted) {
-    const missing = wanted.filter((w) => !data.shows[`${w.source}:${w.id}`]);
-    const when = new Map(missing.map((w) => [`${w.source}:${w.id}`, w.addedAt || now()]));
-    const fetched = [];
-    const animeIds = missing.filter((w) => w.source === 'anilist').map((w) => w.id);
-    if (animeIds.length) fetched.push(...(await sources.fetchAnime(animeIds, now())));
-    for (const w of missing.filter((x) => x.source === 'tvmaze')) {
+  async function addMany(u, wanted) {
+    const keyOf = (w) => `${w.source}:${w.id}`;
+    const missing = wanted.filter((w) => !u.shows[keyOf(w)]);
+    const toFetch = missing.filter((w) => !data.catalog[keyOf(w)]);
+    const animeIds = toFetch.filter((w) => w.source === 'anilist').map((w) => w.id);
+    const fetched = animeIds.length ? await sources.fetchAnime(animeIds, now()) : [];
+    for (const w of toFetch.filter((x) => x.source === 'tvmaze')) {
       const show = await sources.fetchTv(w.id, now()).catch(() => null);
       if (show) fetched.push(show);
     }
+    const asked = new Set(toFetch.map(keyOf));
+    for (const show of fetched) if (show && asked.has(show.key)) data.catalog[show.key] = show;
+
     let added = 0;
-    for (const show of fetched) {
-      if (!show || data.shows[show.key] || !when.has(show.key)) continue;
-      data.shows[show.key] = { ...show, addedAt: when.get(show.key) };
+    for (const w of missing) {
+      const key = keyOf(w);
+      if (!data.catalog[key] || u.shows[key]) continue;
+      u.shows[key] = { addedAt: w.addedAt || now() };
       added++;
     }
     if (added) {
       store.save();
-      discoverSoon();
+      discoverSoon(u);
     }
     return added;
   }
 
-  /** Daily snapshot on disk; weekly copy to Discord when switched on. */
+  /** Daily copy of the data file; weekly personal backup to Discord for those who opted in. */
   async function runBackups() {
-    const { day } = localClock(now(), data.settings.timeZone);
+    const { day } = localClock(now(), '');
     if (data.lastSnapshotDay !== day) {
-      writeSnapshot(store.dir, data, day, now());
       data.lastSnapshotDay = day;
       store.save();
+      writeSnapshot(store, day);
     }
-    const s = data.settings;
-    if (s.backupToDiscord && s.discordWebhook && now() - data.lastDiscordBackup > 7 * 24 * 60 * 60 * 1000) {
+    for (const u of users()) {
+      const s = u.settings;
+      if (!s.backupToDiscord || !s.discordWebhook || now() - u.lastDiscordBackup <= 7 * 24 * 60 * 60 * 1000) continue;
       // Recorded first, so a failing webhook is retried next week rather than every minute.
-      data.lastDiscordBackup = now();
+      u.lastDiscordBackup = now();
       store.save();
       try {
-        await sendFile(s.discordWebhook, `show-tracker-backup-${day}.json`, JSON.stringify(buildBackup(data, now()), null, 1), `Weekly Show Tracker backup (${Object.keys(data.shows).length} shows).`);
+        await sendFile(s.discordWebhook, `show-tracker-backup-${day}.json`, JSON.stringify(buildBackup(u, data.catalog, now()), null, 1), `Weekly Show Tracker backup (${Object.keys(u.shows).length} shows).`);
       } catch (e) {
-        data.lastError = `Weekly backup to Discord failed — ${e.message}`;
+        u.lastError = `Weekly backup to Discord failed — ${e.message}`;
         store.save();
       }
     }
   }
 
   return {
+    showsOf,
     checkAlerts,
-    addMany,
-    runBackups,
     flush,
     refreshDiscover,
+    addMany,
+    runBackups,
     /** Concurrent callers share one refresh. */
     refresh() {
       refreshing ||= doRefresh().finally(() => {
@@ -266,42 +285,53 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       });
       return refreshing;
     },
-    async addShow(source, id) {
-      const show = await fetchOne(source, id);
-      if (!show) throw new Error('Show not found.');
-      if (!data.shows[show.key]) {
-        data.shows[show.key] = { ...show, addedAt: now() };
-        store.save();
-        if (source === 'anilist') discoverSoon();
-      }
-      return data.shows[show.key];
+    async addShow(u, source, id) {
+      if (!['anilist', 'tvmaze'].includes(source)) throw new Error('Show not found.');
+      const key = `${source}:${id}`;
+      if (!u.shows[key] && !(await addMany(u, [{ source, id }]))) throw new Error('Show not found.');
+      return key;
     },
-    removeShow(key) {
-      const gone = data.shows[key];
-      delete data.shows[key];
-      data.muted = data.muted.filter((k) => k !== key);
+    removeShow(u, key) {
+      const had = Object.hasOwn(u.shows, key);
+      const wasAnime = data.catalog[key]?.source === 'anilist';
+      delete u.shows[key];
+      u.muted = u.muted.filter((k) => k !== key);
+      pruneCatalog();
       store.save();
-      if (gone?.source === 'anilist') discoverSoon();
+      if (had && wasAnime) discoverSoon(u);
+    },
+    /** Remove an account and everything only it was using. */
+    removeUser(id) {
+      delete data.users[id];
+      for (const [hash, r] of Object.entries(data.resets)) if (r.userId === id) delete data.resets[hash];
+      pruneCatalog();
+      store.save();
     },
     /** Called every minute. */
     async tick() {
-      const stale = Object.keys(data.shows).length && now() - data.lastRefresh > REFRESH_EVERY;
+      const stale = Object.keys(data.catalog).length && now() - data.lastRefresh > REFRESH_EVERY;
       // After a failed refresh, wait a few minutes before trying again.
       if (stale && now() - lastAttempt > 5 * 60 * 1000) {
         lastAttempt = now();
         await this.refresh();
       } else {
-        await checkAlerts();
+        for (const u of users()) await checkAlerts(u);
       }
-      await checkReminders();
+      for (const u of users()) {
+        await checkReminders(u);
+        // Releases anything held back by quiet hours or waiting for the digest.
+        await flush(u);
+        // Suggestions change slowly: rebuild twice a day, retrying hourly on failure.
+        const discoverStale = now() - (u.discover?.updatedAt || 0) > DISCOVER_EVERY;
+        if (discoverStale && now() - (discoverAttempt.get(u.id) || 0) > 60 * 60 * 1000) {
+          discoverAttempt.set(u.id, now());
+          await refreshDiscover(u).catch((e) => console.error('Discover refresh failed:', e.message));
+        }
+      }
       await runBackups().catch((e) => console.error('Backup failed:', e.message));
-      // Releases anything held back by quiet hours or waiting for the digest.
-      await flush();
-      // Suggestions change slowly: rebuild twice a day, retrying hourly on failure.
-      const discoverStale = now() - (data.discover?.updatedAt || 0) > DISCOVER_EVERY;
-      if (discoverStale && now() - lastDiscoverAttempt > 60 * 60 * 1000) {
-        lastDiscoverAttempt = now();
-        await refreshDiscover().catch((e) => console.error('Discover refresh failed:', e.message));
+      // Expired invite and reset links are of no further use.
+      for (const bag of [data.invites, data.resets]) {
+        for (const [hash, entry] of Object.entries(bag)) if (entry.expiresAt < now()) delete bag[hash];
       }
     },
   };

@@ -6,9 +6,9 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVICES, animeSeason } from './app/js/core.js';
-import { openStore } from './server/store.js';
+import { openStore, makeUser } from './server/store.js';
 import { createTracker } from './server/tracker.js';
-import { hashPassword, checkPassword, sessionCookie, clearCookie, hasSession, safeEqual } from './server/auth.js';
+import { hashPassword, checkPassword, cleanUsername, newToken, tokenHash, sessionCookie, clearCookie, sessionUser, safeEqual } from './server/auth.js';
 import { sendAlerts, sendDiscordFile, validateChannels } from './server/notify.js';
 import { buildBackup, readBackup } from './server/backup.js';
 import { buildIcs } from './server/ics.js';
@@ -61,15 +61,16 @@ async function readJson(req, limit = 64 * 1024) {
   throw new HttpError(400, 'Invalid JSON.');
 }
 
-export function createApp({ dataDir, sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, now = Date.now } = {}) {
-  const store = openStore(dataDir);
+export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, now = Date.now } = {}) {
+  const store = openStore(dataDir, { dataKey });
   const { data } = store;
   const tracker = createTracker({ store, sources, send, sendFile, now });
-  // Until a password exists, creating one needs this code from the server log,
-  // so a stranger who finds the site first cannot claim it.
-  const setupCode = data.auth ? null : String(randomInt(0, 1_000_000)).padStart(6, '0');
 
-  // Failed password attempts, per client address and overall.
+  // Until the first account exists, creating it needs this code from the server
+  // log, so a stranger who finds the site first cannot claim it.
+  const setupCode = Object.keys(data.users).length ? null : String(randomInt(0, 1_000_000)).padStart(6, '0');
+
+  // Failed password / code / link attempts, per client address and overall.
   const failures = new Map();
   const WINDOW = 15 * 60 * 1000;
   const recent = (key) => {
@@ -94,27 +95,56 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
     if (failures.size > 5000) failures.clear();
   };
 
-  const publicState = () => ({
-    shows: data.shows,
-    alerts: data.alerts,
-    settings: data.settings,
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const users = () => Object.values(data.users);
+  const findUser = (name) => users().find((u) => u.username.toLowerCase() === String(name).toLowerCase()) || null;
+  const liveEntry = (bag, token) => {
+    const entry = typeof token === 'string' && token ? bag[tokenHash(token)] : null;
+    return entry && entry.expiresAt > now() ? entry : null;
+  };
+  const requirePassword = (password) => {
+    if (typeof password !== 'string' || password.length < 8) throw new HttpError(400, 'Use a password of at least 8 characters.');
+  };
+  const requireUsername = (name, except) => {
+    const clean = cleanUsername(name);
+    if (!clean) throw new HttpError(400, 'Usernames are 3–24 letters, digits, “_” or “-”.');
+    const taken = findUser(clean);
+    if (taken && taken !== except) throw new HttpError(409, 'That username is taken.');
+    return clean;
+  };
+
+  /** Everything the signed-in user's own browser may see. Never another user's data. */
+  const publicState = (u) => ({
+    me: { id: u.id, username: u.username, admin: u.admin },
+    shows: Object.fromEntries(tracker.showsOf(u).map((s) => [s.key, s])),
+    alerts: u.alerts,
+    settings: u.settings,
     lastRefresh: data.lastRefresh,
-    lastError: data.lastError,
-    feedToken: data.feedToken,
-    watched: data.watched,
-    muted: data.muted,
+    lastError: u.lastError || data.lastError,
+    feedToken: u.feedToken,
+    shareToken: u.shareToken,
+    watched: u.watched,
+    muted: u.muted,
   });
 
   /** Suggestions, minus anything now tracked or waved away. */
-  const publicDiscover = () => {
-    const hidden = new Set([...Object.keys(data.shows), ...data.dismissed]);
-    const d = data.discover || { sequels: [], recs: [], updatedAt: 0 };
+  const publicDiscover = (u) => {
+    const hidden = new Set([...Object.keys(u.shows), ...u.dismissed]);
+    const d = u.discover || { sequels: [], recs: [], updatedAt: 0 };
     return {
       sequels: d.sequels.filter((s) => !hidden.has(s.key)),
       recs: d.recs.filter((s) => !hidden.has(s.key)),
       updatedAt: d.updatedAt,
     };
   };
+  /** What an admin may know about the accounts: names and dates, never lists. */
+  const adminView = () => ({
+    encrypted: store.encrypted,
+    users: users()
+      .map((x) => ({ id: x.id, username: x.username, admin: x.admin, createdAt: x.createdAt }))
+      .sort((a, b) => a.createdAt - b.createdAt),
+    pendingInvites: Object.values(data.invites).filter((i) => i.expiresAt > now()).length,
+  });
   const seasonCache = new Map();
 
   async function api(req, res, url) {
@@ -124,7 +154,8 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
     };
     const route = `${req.method} ${url.pathname}`;
     const secure = req.headers['x-forwarded-proto'] === 'https';
-    const authed = hasSession(req.headers.cookie, data.secret, now());
+    const u = sessionUser(req.headers.cookie, data, now());
+    const signIn = (user) => ({ 'Set-Cookie': sessionCookie(data.secret, user, secure, now()) });
 
     // Browsers send Origin on cross-site writes; refuse any that are not ours.
     if (req.method !== 'GET' && req.headers.origin) {
@@ -132,39 +163,140 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
       if (new URL(req.headers.origin).host !== host) throw new HttpError(403, 'Cross-site request refused.');
     }
 
-    if (route === 'GET /api/session') return reply(200, { setup: Boolean(data.auth), authed });
+    // ---------------------------------------------------------- signed out
+
+    if (route === 'GET /api/session') {
+      return reply(200, { setup: users().length > 0, authed: Boolean(u), me: u ? { id: u.id, username: u.username, admin: u.admin } : null });
+    }
 
     if (route === 'POST /api/setup') {
-      if (data.auth) throw new HttpError(409, 'A password has already been set.');
+      if (users().length) throw new HttpError(409, 'This site has already been set up.');
       guardAttempts(req);
-      const { password, code } = await readJson(req);
+      const { username, password, code } = await readJson(req);
       if (!safeEqual(String(code ?? '').trim(), setupCode)) {
         noteFailure(req);
         throw new HttpError(403, 'Wrong setup code. It is printed in the server log.');
       }
-      if (typeof password !== 'string' || password.length < 8) throw new HttpError(400, 'Use a password of at least 8 characters.');
-      data.auth = hashPassword(password);
+      requirePassword(password);
+      const user = makeUser({ username: requireUsername(username), admin: true, auth: hashPassword(password), createdAt: now() });
+      data.users[user.id] = user;
       store.save();
-      return reply(200, { ok: true }, { 'Set-Cookie': sessionCookie(data.secret, secure, now()) });
+      return reply(200, { ok: true }, signIn(user));
     }
 
     if (route === 'POST /api/login') {
       guardAttempts(req);
-      const { password } = await readJson(req);
-      if (!checkPassword(password, data.auth)) {
+      const { username, password } = await readJson(req);
+      const user = findUser(username ?? '');
+      if (!checkPassword(password, user?.auth)) {
         noteFailure(req);
-        throw new HttpError(401, 'Wrong password.');
+        throw new HttpError(401, 'Wrong username or password.');
       }
-      return reply(200, { ok: true }, { 'Set-Cookie': sessionCookie(data.secret, secure, now()) });
+      return reply(200, { ok: true }, signIn(user));
     }
 
     if (route === 'POST /api/logout') return reply(200, { ok: true }, { 'Set-Cookie': clearCookie() });
 
-    if (!authed) throw new HttpError(401, 'Not signed in.');
+    // Invite and reset links: looking one up or using one counts against the
+    // guess limit when it is wrong.
+    if (route === 'GET /api/link') {
+      guardAttempts(req);
+      const token = url.searchParams.get('token');
+      const kind = url.searchParams.get('kind');
+      const entry = kind === 'invite' ? liveEntry(data.invites, token) : kind === 'reset' ? liveEntry(data.resets, token) : null;
+      if (!entry) {
+        noteFailure(req);
+        throw new HttpError(404, 'This link is not valid any more. Ask for a new one.');
+      }
+      return reply(200, { kind, username: kind === 'reset' ? data.users[entry.userId]?.username : null });
+    }
+
+    if (route === 'POST /api/signup') {
+      guardAttempts(req);
+      const { token, username, password } = await readJson(req);
+      if (!liveEntry(data.invites, token)) {
+        noteFailure(req);
+        throw new HttpError(404, 'This invite is not valid any more. Ask for a new one.');
+      }
+      requirePassword(password);
+      const user = makeUser({ username: requireUsername(username), auth: hashPassword(password), createdAt: now() });
+      data.users[user.id] = user;
+      delete data.invites[tokenHash(token)];
+      store.save();
+      return reply(200, { ok: true }, signIn(user));
+    }
+
+    if (route === 'POST /api/reset') {
+      guardAttempts(req);
+      const { token, password } = await readJson(req);
+      const entry = liveEntry(data.resets, token);
+      const user = entry && data.users[entry.userId];
+      if (!user) {
+        noteFailure(req);
+        throw new HttpError(404, 'This link is not valid any more. Ask for a new one.');
+      }
+      requirePassword(password);
+      user.auth = hashPassword(password);
+      user.sessionKey = randomBytes(16).toString('hex'); // signs every device out
+      delete data.resets[tokenHash(token)];
+      store.save();
+      return reply(200, { ok: true }, signIn(user));
+    }
+
+    // A list its owner chose to share: titles and schedule only.
+    if (route === 'GET /api/shared') {
+      guardAttempts(req);
+      const token = url.searchParams.get('token') || '';
+      const owner = users().find((x) => x.shareToken && safeEqual(x.shareToken, token));
+      if (!owner) {
+        noteFailure(req);
+        throw new HttpError(404, 'This shared list is not available.');
+      }
+      return reply(200, { username: owner.username, list: tracker.showsOf(owner).map(({ addedAt, ...show }) => show) });
+    }
+
+    if (!u) throw new HttpError(401, 'Not signed in.');
+
+    // ---------------------------------------------------------- admin only
+
+    if (url.pathname.startsWith('/api/admin/')) {
+      if (!u.admin) throw new HttpError(403, 'Only an admin can do that.');
+      switch (route) {
+        case 'GET /api/admin/users':
+          return reply(200, adminView());
+
+        case 'POST /api/admin/invites': {
+          const token = newToken();
+          data.invites[tokenHash(token)] = { expiresAt: now() + 7 * DAY_MS };
+          store.save();
+          return reply(200, { token, ...adminView() });
+        }
+
+        case 'POST /api/admin/reset': {
+          const { id } = await readJson(req);
+          if (typeof id !== 'string' || !Object.hasOwn(data.users, id)) throw new HttpError(400, 'Unknown user.');
+          const token = newToken();
+          data.resets[tokenHash(token)] = { userId: id, expiresAt: now() + DAY_MS };
+          store.save();
+          return reply(200, { token });
+        }
+
+        case 'DELETE /api/admin/users': {
+          const id = url.searchParams.get('id') || '';
+          if (!Object.hasOwn(data.users, id)) throw new HttpError(400, 'Unknown user.');
+          if (id === u.id) throw new HttpError(400, 'You cannot delete your own account here.');
+          tracker.removeUser(id);
+          return reply(200, adminView());
+        }
+      }
+      throw new HttpError(404, 'Not found.');
+    }
+
+    // ---------------------------------------------------------- signed in
 
     switch (route) {
       case 'GET /api/state':
-        return reply(200, publicState());
+        return reply(200, publicState(u));
 
       case 'GET /api/search': {
         const q = (url.searchParams.get('q') || '').trim().slice(0, 100);
@@ -176,17 +308,17 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
       case 'POST /api/shows': {
         const { source, id } = await readJson(req);
         if (!['anilist', 'tvmaze'].includes(source) || !Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Unknown show.');
-        await tracker.addShow(source, id);
-        return reply(200, publicState());
+        await tracker.addShow(u, source, id);
+        return reply(200, publicState(u));
       }
 
       case 'DELETE /api/shows':
-        tracker.removeShow(url.searchParams.get('key'));
-        return reply(200, publicState());
+        tracker.removeShow(u, url.searchParams.get('key') || '');
+        return reply(200, publicState(u));
 
       case 'PUT /api/settings': {
         const body = await readJson(req);
-        const cur = data.settings;
+        const cur = u.settings;
         const hour = (v, fallback) => (v === null ? null : Number.isInteger(v) && v >= 0 && v <= 23 ? v : fallback);
         const next = {
           services: Array.isArray(body.services) ? body.services.filter((s) => Object.hasOwn(SERVICES, s)) : cur.services,
@@ -202,27 +334,28 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
         };
         const problem = validateChannels(next);
         if (problem) throw new HttpError(400, problem);
-        data.settings = next;
+        u.settings = next;
+        u.lastError = null;
         store.save();
-        return reply(200, publicState());
+        return reply(200, publicState(u));
       }
 
       case 'POST /api/watched': {
         const { ids, watched } = await readJson(req);
         if (!Array.isArray(ids) || ids.length > 500 || !ids.every((i) => typeof i === 'string' && i.length <= 80)) throw new HttpError(400, 'Bad episode list.');
-        const set = new Set(data.watched);
+        const set = new Set(u.watched);
         for (const id of ids) watched === false ? set.delete(id) : set.add(id);
-        data.watched = [...set].slice(-5000);
+        u.watched = [...set].slice(-5000);
         store.save();
-        return reply(200, publicState());
+        return reply(200, publicState(u));
       }
 
       case 'POST /api/shows/mute': {
         const { key, muted } = await readJson(req);
-        if (typeof key !== 'string' || !Object.hasOwn(data.shows, key)) throw new HttpError(400, 'Unknown show.');
-        data.muted = muted === false ? data.muted.filter((k) => k !== key) : [...new Set([...data.muted, key])];
+        if (typeof key !== 'string' || !Object.hasOwn(u.shows, key)) throw new HttpError(400, 'Unknown show.');
+        u.muted = muted === false ? u.muted.filter((k) => k !== key) : [...new Set([...u.muted, key])];
         store.save();
-        return reply(200, publicState());
+        return reply(200, publicState(u));
       }
 
       case 'GET /api/export': {
@@ -233,7 +366,7 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
           'Cache-Control': 'no-store',
           ...securityHeaders(req),
         });
-        return res.end(JSON.stringify(buildBackup(data, now()), null, 1));
+        return res.end(JSON.stringify(buildBackup(u, data.catalog, now()), null, 1));
       }
 
       case 'POST /api/import': {
@@ -243,47 +376,47 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
         } catch (e) {
           throw e instanceof HttpError ? e : new HttpError(400, e.message);
         }
-        const added = await tracker.addMany(backup.shows);
-        data.watched = [...new Set([...data.watched, ...backup.watched])].slice(-5000);
-        data.muted = [...new Set([...data.muted, ...backup.muted])].filter((k) => Object.hasOwn(data.shows, k));
-        data.dismissed = [...new Set([...data.dismissed, ...backup.dismissed])].slice(-2000);
-        if (Array.isArray(backup.settings.services)) data.settings.services = backup.settings.services.filter((x) => Object.hasOwn(SERVICES, x));
+        const added = await tracker.addMany(u, backup.shows);
+        u.watched = [...new Set([...u.watched, ...backup.watched])].slice(-5000);
+        u.muted = [...new Set([...u.muted, ...backup.muted])].filter((k) => Object.hasOwn(u.shows, k));
+        u.dismissed = [...new Set([...u.dismissed, ...backup.dismissed])].slice(-2000);
+        if (Array.isArray(backup.settings.services)) u.settings.services = backup.settings.services.filter((x) => Object.hasOwn(SERVICES, x));
         store.save();
-        return reply(200, { ...publicState(), added, skipped: backup.shows.length - added });
+        return reply(200, { ...publicState(u), added, skipped: backup.shows.length - added });
       }
 
       case 'POST /api/import/anilist': {
         const { username } = await readJson(req);
         if (typeof username !== 'string' || !/^[\w-]{2,30}$/.test(username.trim())) throw new HttpError(400, 'Enter an AniList username.');
         const ids = (await sources.fetchUserList(username.trim())).slice(0, 300);
-        const added = await tracker.addMany(ids.map((id) => ({ source: 'anilist', id })));
-        return reply(200, { ...publicState(), added, skipped: ids.length - added });
+        const added = await tracker.addMany(u, ids.map((id) => ({ source: 'anilist', id })));
+        return reply(200, { ...publicState(u), added, skipped: ids.length - added });
       }
 
       case 'POST /api/refresh':
         await tracker.refresh();
-        return reply(200, publicState());
+        return reply(200, publicState(u));
 
       case 'POST /api/alerts/read':
-        for (const a of data.alerts) a.read = true;
+        for (const a of u.alerts) a.read = true;
         store.save();
-        return reply(200, publicState());
+        return reply(200, publicState(u));
 
       case 'DELETE /api/alerts':
-        data.alerts = [];
+        u.alerts = [];
         store.save();
-        return reply(200, publicState());
+        return reply(200, publicState(u));
 
       case 'GET /api/discover':
-        if (!data.discover) await tracker.refreshDiscover({ silent: true });
-        return reply(200, publicDiscover());
+        if (!u.discover) await tracker.refreshDiscover(u, { silent: true });
+        return reply(200, publicDiscover(u));
 
       case 'POST /api/discover/dismiss': {
         const { key } = await readJson(req);
         if (typeof key !== 'string' || !/^anilist:\d+$/.test(key)) throw new HttpError(400, 'Unknown show.');
-        if (!data.dismissed.includes(key)) data.dismissed = [...data.dismissed, key].slice(-2000);
+        if (!u.dismissed.includes(key)) u.dismissed = [...u.dismissed, key].slice(-2000);
         store.save();
-        return reply(200, publicDiscover());
+        return reply(200, publicDiscover(u));
       }
 
       case 'GET /api/season': {
@@ -297,34 +430,47 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
         return reply(200, { season, year, list: hit.shows });
       }
 
+      case 'PUT /api/account': {
+        const { username } = await readJson(req);
+        u.username = requireUsername(username, u);
+        store.save();
+        return reply(200, publicState(u));
+      }
+
       case 'POST /api/password': {
         guardAttempts(req);
         const { current, next } = await readJson(req);
-        if (!checkPassword(current, data.auth)) {
+        if (!checkPassword(current, u.auth)) {
           noteFailure(req);
           throw new HttpError(403, 'The current password is wrong.');
         }
-        if (typeof next !== 'string' || next.length < 8) throw new HttpError(400, 'Use a password of at least 8 characters.');
-        data.auth = hashPassword(next);
-        // A new signing secret signs every other device out.
-        data.secret = randomBytes(32).toString('hex');
+        requirePassword(next);
+        u.auth = hashPassword(next);
+        u.sessionKey = randomBytes(16).toString('hex'); // signs every other device out
         store.save();
-        return reply(200, { ok: true }, { 'Set-Cookie': sessionCookie(data.secret, secure, now()) });
+        return reply(200, { ok: true }, signIn(u));
       }
 
       case 'POST /api/sessions/revoke':
-        data.secret = randomBytes(32).toString('hex');
+        u.sessionKey = randomBytes(16).toString('hex');
         store.save();
-        return reply(200, { ok: true }, { 'Set-Cookie': sessionCookie(data.secret, secure, now()) });
+        return reply(200, { ok: true }, signIn(u));
 
       case 'POST /api/feed/rotate':
-        data.feedToken = randomBytes(18).toString('hex');
+        u.feedToken = randomBytes(18).toString('hex');
         store.save();
-        return reply(200, publicState());
+        return reply(200, publicState(u));
+
+      case 'POST /api/share': {
+        const { enabled } = await readJson(req);
+        u.shareToken = enabled ? newToken() : null;
+        store.save();
+        return reply(200, publicState(u));
+      }
 
       case 'POST /api/test-alert': {
-        if (!data.settings.ntfyUrl && !data.settings.discordWebhook) throw new HttpError(400, 'Add an ntfy topic or Discord webhook first.');
-        const errors = await send(data.settings, [{ title: 'Show Tracker', body: 'Test alert — delivery is working.', at: now() }]);
+        if (!u.settings.ntfyUrl && !u.settings.discordWebhook) throw new HttpError(400, 'Add an ntfy topic or Discord webhook first.');
+        const errors = await send(u.settings, [{ title: 'Show Tracker', body: 'Test alert — delivery is working.', at: now() }]);
         if (errors.length) throw new HttpError(502, errors.join('; '));
         return reply(200, { ok: true });
       }
@@ -342,9 +488,11 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
         return res.end('ok');
       }
       if (url.pathname === '/calendar.ics') {
-        if (!safeEqual(url.searchParams.get('token') || '', data.feedToken)) throw new HttpError(404, 'Not found.');
+        const token = url.searchParams.get('token') || '';
+        const owner = Object.values(data.users).find((x) => safeEqual(x.feedToken, token));
+        if (!owner) throw new HttpError(404, 'Not found.');
         res.writeHead(200, { 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-store' });
-        return res.end(buildIcs(Object.values(data.shows), now()));
+        return res.end(buildIcs(tracker.showsOf(owner), now()));
       }
       if (url.pathname.startsWith('/api/')) return await api(req, res, url);
 
@@ -382,8 +530,20 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, s
 // Run directly: `node server.js`
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
-  const { server, tracker, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data') });
-  if (setupCode) console.log(`No password set yet. Setup code for the first visit: ${setupCode}`);
+  const dataKey = process.env.DATA_KEY || '';
+  const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey });
+  console.log(store.encrypted ? 'Data is encrypted at rest.' : 'WARNING: DATA_KEY is not set, so data is stored unencrypted.');
+  if (setupCode) console.log(`No account exists yet. Setup code for the first visit: ${setupCode}`);
+  // Locked out as admin? Start once with RECOVER_ADMIN=yes to get a reset link.
+  if (process.env.RECOVER_ADMIN === 'yes') {
+    const admin = Object.values(store.data.users).find((u) => u.admin);
+    if (admin) {
+      const token = newToken();
+      store.data.resets[tokenHash(token)] = { userId: admin.id, expiresAt: Date.now() + 60 * 60 * 1000 };
+      store.save();
+      console.log(`Admin password reset (valid 1 hour): open the site and add  /#reset=${token}  to its address. Then remove RECOVER_ADMIN.`);
+    }
+  }
   process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e));
   const tick = () => tracker.tick().catch((e) => console.error('Background check failed:', e.message));
   tick();
@@ -391,8 +551,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // No host given: Node listens on IPv6 and IPv4 where IPv6 exists and on IPv4
   // alone otherwise, so health checks against `localhost` work either way.
   server.listen(port, () => console.log(`Show Tracker listening on port ${port}`));
-  for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => {
-    server.close(() => process.exit(0));
-    server.closeAllConnections();
-  });
+  for (const sig of ['SIGTERM', 'SIGINT']) {
+    process.on(sig, () => {
+      server.close(() => process.exit(0));
+      server.closeAllConnections();
+    });
+  }
 }
