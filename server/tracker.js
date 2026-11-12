@@ -2,12 +2,13 @@
 import { collectAlerts, myStreams } from '../app/js/core.js';
 import { computeDiscover } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
+import { buildBackup, writeSnapshot } from './backup.js';
 
 const MAX_ALERTS = 100;
 export const REFRESH_EVERY = 30 * 60 * 1000;
 export const DISCOVER_EVERY = 12 * 60 * 60 * 1000;
 
-export function createTracker({ store, sources, send, now = Date.now }) {
+export function createTracker({ store, sources, send, sendFile = async () => {}, now = Date.now }) {
   const { data } = store;
   let refreshing = null;
   let lastAttempt = 0;
@@ -203,8 +204,59 @@ export function createTracker({ store, sources, send, now = Date.now }) {
     await checkAlerts();
   }
 
+  /**
+   * Add several shows at once (list import, restore). `wanted` is
+   * [{ source, id, addedAt? }]; returns how many were new.
+   */
+  async function addMany(wanted) {
+    const missing = wanted.filter((w) => !data.shows[`${w.source}:${w.id}`]);
+    const when = new Map(missing.map((w) => [`${w.source}:${w.id}`, w.addedAt || now()]));
+    const fetched = [];
+    const animeIds = missing.filter((w) => w.source === 'anilist').map((w) => w.id);
+    if (animeIds.length) fetched.push(...(await sources.fetchAnime(animeIds, now())));
+    for (const w of missing.filter((x) => x.source === 'tvmaze')) {
+      const show = await sources.fetchTv(w.id, now()).catch(() => null);
+      if (show) fetched.push(show);
+    }
+    let added = 0;
+    for (const show of fetched) {
+      if (!show || data.shows[show.key] || !when.has(show.key)) continue;
+      data.shows[show.key] = { ...show, addedAt: when.get(show.key) };
+      added++;
+    }
+    if (added) {
+      store.save();
+      discoverSoon();
+    }
+    return added;
+  }
+
+  /** Daily snapshot on disk; weekly copy to Discord when switched on. */
+  async function runBackups() {
+    const { day } = localClock(now(), data.settings.timeZone);
+    if (data.lastSnapshotDay !== day) {
+      writeSnapshot(store.dir, data, day, now());
+      data.lastSnapshotDay = day;
+      store.save();
+    }
+    const s = data.settings;
+    if (s.backupToDiscord && s.discordWebhook && now() - data.lastDiscordBackup > 7 * 24 * 60 * 60 * 1000) {
+      // Recorded first, so a failing webhook is retried next week rather than every minute.
+      data.lastDiscordBackup = now();
+      store.save();
+      try {
+        await sendFile(s.discordWebhook, `show-tracker-backup-${day}.json`, JSON.stringify(buildBackup(data, now()), null, 1), `Weekly Show Tracker backup (${Object.keys(data.shows).length} shows).`);
+      } catch (e) {
+        data.lastError = `Weekly backup to Discord failed — ${e.message}`;
+        store.save();
+      }
+    }
+  }
+
   return {
     checkAlerts,
+    addMany,
+    runBackups,
     flush,
     refreshDiscover,
     /** Concurrent callers share one refresh. */
@@ -242,6 +294,7 @@ export function createTracker({ store, sources, send, now = Date.now }) {
         await checkAlerts();
       }
       await checkReminders();
+      await runBackups().catch((e) => console.error('Backup failed:', e.message));
       // Releases anything held back by quiet hours or waiting for the digest.
       await flush();
       // Suggestions change slowly: rebuild twice a day, retrying hourly on failure.

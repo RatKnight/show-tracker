@@ -24,6 +24,12 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
   anything you have not watched yet is listed first.
 - **Alert timing** – send alerts as episodes air or as one daily summary, set quiet
   hours, get a heads-up before an episode airs, and mute individual shows.
+- **Backups** – a daily snapshot on the server (`/data/backups`, last 14 days), a
+  downloadable backup file with restore, and an optional weekly copy posted to your
+  Discord channel. Backup files never contain the password or alert addresses.
+- **Import** – pull in the Watching and Planning lists of a public AniList profile.
+- **Installable** – add it to your phone's home screen or install it from the
+  browser on desktop.
 - **Calendar feed** – a private `.ics` address (under *Settings*) you can subscribe
   to from Google Calendar, Outlook or Apple Calendar.
 - **Streaming services** – each show is tagged with where it streams. Your services

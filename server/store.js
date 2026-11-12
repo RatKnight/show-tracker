@@ -27,6 +27,8 @@ export function openStore(dir) {
     outbox: [],
     reminded: [],
     lastDigestDay: null,
+    lastSnapshotDay: null,
+    lastDiscordBackup: 0,
     lastRefresh: 0,
     lastError: null,
     auth: null,
@@ -43,10 +45,12 @@ export function openStore(dir) {
       quietEnd: null,
       remindMinutes: 0,
       timeZone: '',
+      backupToDiscord: false,
       ...saved.settings,
     },
   };
   const store = {
+    dir,
     data,
     save() {
       const tmp = file + '.tmp';

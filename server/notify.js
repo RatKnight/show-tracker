@@ -91,3 +91,12 @@ export async function sendAlerts(settings, messages) {
   }
   return errors;
 }
+
+/** Post a small file to a Discord webhook (used for the weekly backup). */
+export async function sendDiscordFile(webhook, filename, content, message) {
+  const form = new FormData();
+  form.set('payload_json', JSON.stringify({ username: 'Show Tracker', content: message }));
+  form.set('files[0]', new Blob([content], { type: 'application/json' }), filename);
+  const res = await fetch(webhook, { method: 'POST', body: form, signal: AbortSignal.timeout(30000), redirect: 'error' });
+  if (!res.ok) throw new Error(`Discord replied ${res.status}`);
+}

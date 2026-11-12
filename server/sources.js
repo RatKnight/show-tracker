@@ -151,3 +151,23 @@ export async function fetchSeason(season, year, now = Date.now()) {
   }
   return shows;
 }
+
+/** Anime ids on a public AniList profile's Watching and Planning lists. */
+export async function fetchUserList(userName) {
+  let data;
+  try {
+    data = await gql(
+      `query ($name: String) {
+        MediaListCollection(userName: $name, type: ANIME, status_in: [CURRENT, PLANNING]) {
+          lists { entries { mediaId } }
+        }
+      }`,
+      { name: userName },
+    );
+  } catch (e) {
+    if (/not found|private/i.test(e.message)) throw new Error(`No public AniList profile called “${userName}” was found.`);
+    throw e;
+  }
+  const ids = (data.MediaListCollection?.lists || []).flatMap((l) => l.entries.map((e) => e.mediaId));
+  return [...new Set(ids)];
+}
