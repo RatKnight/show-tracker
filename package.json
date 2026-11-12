@@ -8,5 +8,5 @@
     "start": "node server.js",
     "test": "node --test"
   },
-  "license": "UNLICENSED"
+  "license": "MIT"
 }
