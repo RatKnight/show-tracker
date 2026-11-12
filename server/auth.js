@@ -1,6 +1,26 @@
 // Passwords, sessions and one-time links.
 import { scryptSync, randomBytes, timingSafeEqual, createHmac, createHash } from 'node:crypto';
 
+// Cookie names. Over HTTPS every cookie carries the "__Host-" prefix: browsers
+// then only accept it from this exact host, over HTTPS, for the whole site, so
+// another site on a sibling address (or anything on plain HTTP) cannot plant or
+// replace one. Plain HTTP (local development) cannot use the prefix.
+const cookieName = (base, secure) => (secure ? `__Host-${base}` : base);
+const readCookie = (cookieHeader, base, secure) => {
+  const name = cookieName(base, secure);
+  for (const part of String(cookieHeader || '').split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return '';
+};
+/** Remove a cookie under its current name and the names used before the prefix. */
+const clearing = (base, secure, oldPath, sameSite) => [
+  ...(secure ? [`__Host-${base}=; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=0; Secure`] : []),
+  `${base}=; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=0`,
+  ...(oldPath === '/' ? [] : [`${base}=; Path=${oldPath}; HttpOnly; SameSite=${sameSite}; Max-Age=0`]),
+];
+
 const COOKIE = 'st_session';
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -39,16 +59,16 @@ const sign = (secret, user, value) => createHmac('sha256', `${secret}:${user.ses
 
 export function sessionCookie(secret, user, secure, now = Date.now()) {
   const value = `${user.id}.${now + SESSION_MS}`;
-  return `${COOKIE}=${value}.${sign(secret, user, value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}${secure ? '; Secure' : ''}`;
+  return `${cookieName(COOKIE, secure)}=${value}.${sign(secret, user, value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}${secure ? '; Secure' : ''}`;
 }
 
-export function clearCookie() {
-  return `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+export function clearCookie(secure) {
+  return clearing(COOKIE, secure, '/', 'Lax');
 }
 
 /** The signed-in user for a Cookie header, or null. */
-export function sessionUser(cookieHeader, data, now = Date.now()) {
-  const match = /(?:^|;\s*)st_session=(u[0-9a-f]+)\.(\d+)\.([0-9a-f]+)/.exec(cookieHeader || '');
+export function sessionUser(cookieHeader, data, now = Date.now(), secure = false) {
+  const match = /^(u[0-9a-f]+)\.(\d+)\.([0-9a-f]+)$/.exec(readCookie(cookieHeader, COOKIE, secure));
   if (!match) return null;
   const [, id, expires, mac] = match;
   const user = Object.hasOwn(data.users, id) ? data.users[id] : null;
@@ -68,15 +88,15 @@ const PENDING_MS = 5 * 60 * 1000;
 export function pendingCookie(secret, user, secure, now = Date.now()) {
   const value = `${user.id}.${now + PENDING_MS}`;
   const mac = createHmac('sha256', `${secret}:pending:${user.sessionKey}`).update(value).digest('hex');
-  return `${PENDING}=${value}.${mac}; Path=/api/login; HttpOnly; SameSite=Strict; Max-Age=${PENDING_MS / 1000}${secure ? '; Secure' : ''}`;
+  return `${cookieName(PENDING, secure)}=${value}.${mac}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${PENDING_MS / 1000}${secure ? '; Secure' : ''}`;
 }
 
-export function clearPendingCookie() {
-  return `${PENDING}=; Path=/api/login; HttpOnly; SameSite=Strict; Max-Age=0`;
+export function clearPendingCookie(secure) {
+  return clearing(PENDING, secure, '/api/login', 'Strict');
 }
 
-export function pendingUser(cookieHeader, data, now = Date.now()) {
-  const match = /(?:^|;\s*)st_pending=(u[0-9a-f]+)\.(\d+)\.([0-9a-f]+)/.exec(cookieHeader || '');
+export function pendingUser(cookieHeader, data, now = Date.now(), secure = false) {
+  const match = /^(u[0-9a-f]+)\.(\d+)\.([0-9a-f]+)$/.exec(readCookie(cookieHeader, PENDING, secure));
   if (!match) return null;
   const [, id, expires, mac] = match;
   const user = Object.hasOwn(data.users, id) ? data.users[id] : null;
@@ -105,22 +125,22 @@ export const recoveryHash = (code) => tokenHash(String(code ?? '').toLowerCase()
 
 const ADMIN = 'st_admin';
 const ADMIN_MS = 12 * 60 * 60 * 1000;
-const sessionValue = (cookieHeader) => (/(?:^|;\s*)st_session=([\w.]+)/.exec(cookieHeader || '') || [])[1] || '';
+const sessionValue = (cookieHeader, secure) => (/^[\w.]+$/.exec(readCookie(cookieHeader, COOKIE, secure)) || [''])[0];
 const adminMac = (secret, user, session, expires) => createHmac('sha256', `${secret}:admin:${user.sessionKey}`).update(`${session}|${expires}`).digest('hex');
 
 export function adminCookie(secret, user, cookieHeader, secure, now = Date.now()) {
   const expires = now + ADMIN_MS;
-  return `${ADMIN}=${expires}.${adminMac(secret, user, sessionValue(cookieHeader), expires)}; Path=/api/admin; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
+  return `${cookieName(ADMIN, secure)}=${expires}.${adminMac(secret, user, sessionValue(cookieHeader, secure), expires)}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
 }
 
-export function clearAdminCookie() {
-  return `${ADMIN}=; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=0`;
+export function clearAdminCookie(secure) {
+  return clearing(ADMIN, secure, '/api/admin', 'Strict');
 }
 
 /** Has this sign-in session been confirmed for admin work? */
-export function adminUnlocked(cookieHeader, secret, user, now = Date.now()) {
-  const match = /(?:^|;\s*)st_admin=(\d+)\.([0-9a-f]+)/.exec(cookieHeader || '');
-  const session = sessionValue(cookieHeader);
+export function adminUnlocked(cookieHeader, secret, user, now = Date.now(), secure = false) {
+  const match = /^(\d+)\.([0-9a-f]+)$/.exec(readCookie(cookieHeader, ADMIN, secure));
+  const session = sessionValue(cookieHeader, secure);
   if (!match || !session || Number(match[1]) <= now) return false;
   return safeEqual(match[2], adminMac(secret, user, session, match[1]));
 }

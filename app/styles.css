@@ -308,6 +308,26 @@ details[open] > summary { margin-bottom: 10px; }
 }
 .menu button:hover, .menu button:focus-visible { background: var(--panel-2); outline: none; }
 
+/* ---------- guided tour ---------- */
+.tour { position: fixed; inset: 0; z-index: 40; }
+.tour-spot {
+  position: fixed; border-radius: 10px; pointer-events: none;
+  box-shadow: 0 0 0 3px var(--accent), 0 0 0 200vmax rgb(0 0 0 / .62);
+  transition: top .18s, left .18s, width .18s, height .18s;
+}
+.tour-card {
+  position: fixed; width: min(360px, calc(100vw - 24px)); padding: 16px 18px 14px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 16px 40px rgb(0 0 0 / .45);
+}
+.tour-card h3 { margin: 2px 0 6px; font-size: 1.1rem; }
+.tour-card p { margin: 0 0 12px; line-height: 1.45; }
+.tour-card #tour-count { margin-bottom: 0; }
+.tour-actions { display: flex; align-items: center; gap: 8px; }
+.tour-actions .grow { flex: 1; }
+.tour-actions .ghost { background: none; border-color: transparent; color: var(--muted); padding-left: 0; }
+@media (prefers-reduced-motion: reduce) { .tour-spot { transition: none; } }
+
 /* ---------- saved note ---------- */
 .toast {
   position: fixed; right: 20px; bottom: 20px; z-index: 30; padding: 10px 16px; border-radius: 8px;

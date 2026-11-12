@@ -471,12 +471,15 @@ test('auth helpers', () => {
   const bob = makeUser({ username: 'bob' });
   const data = { secret: 'secret', users: { [ann.id]: ann, [bob.id]: bob } };
   const cookie = sessionCookie('secret', ann, true, 1000).split(';')[0];
-  assert.equal(sessionUser(cookie, data, 2000), ann);
-  assert.equal(sessionUser(cookie, { ...data, secret: 'other' }, 2000), null);
-  assert.equal(sessionUser(cookie, data, 1000 + 31 * DAY), null, 'expired');
-  assert.equal(sessionUser(cookie.replace(ann.id, bob.id), data, 2000), null, 'cannot be re-pointed at another user');
+  assert.match(cookie, /^__Host-st_session=/);
+  assert.equal(sessionUser(cookie, data, 2000, true), ann);
+  assert.equal(sessionUser(cookie, data, 2000, false), null, 'the HTTPS cookie is not read on plain HTTP');
+  assert.equal(sessionUser(cookie.replace('__Host-', ''), data, 2000, true), null, 'the plain name is not read over HTTPS');
+  assert.equal(sessionUser(cookie, { ...data, secret: 'other' }, 2000, true), null);
+  assert.equal(sessionUser(cookie, data, 1000 + 31 * DAY, true), null, 'expired');
+  assert.equal(sessionUser(cookie.replace(ann.id, bob.id), data, 2000, true), null, 'cannot be re-pointed at another user');
   ann.sessionKey = 'rotated';
-  assert.equal(sessionUser(cookie, data, 2000), null, 'revoked when the session key changes');
+  assert.equal(sessionUser(cookie, data, 2000, true), null, 'revoked when the session key changes');
   assert.equal(sessionUser('st_session=__proto__.9999999999999.abc', data, 2000), null);
 });
 
@@ -1531,4 +1534,60 @@ test('http: failed sign-ins cannot lock everyone out; one account is capped acro
   for (let i = 0; i < 30; i++) assert.equal((await client(`192.0.2.${i}`).req('POST', '/api/login', { username: 'BOB', password: 'wrong' })).status, 401);
   assert.equal((await client('192.0.2.200').req('POST', '/api/login', { username: 'bob', password: 'password-bob' })).status, 429);
   assert.equal((await client('192.0.2.201').req('POST', '/api/login', { username: 'ann', password: 'password-ann' })).status, 200);
+});
+
+test('http: over HTTPS every cookie is host-locked, and one under the plain name is not accepted', async (t) => {
+  const { base, setupCode } = await serve(t);
+  const origin = base.replace('http:', 'https:');
+  const jar = new Map();
+  const req = async (method, path, body, cookie) => {
+    const res = await fetch(base + path, {
+      method,
+      headers: { 'X-Forwarded-Proto': 'https', Origin: origin, 'Content-Type': 'application/json', Cookie: cookie ?? [...jar].map(([k, v]) => `${k}=${v}`).join('; ') },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const lines = res.headers.getSetCookie();
+    for (const line of lines) {
+      const [name, value] = line.split(';')[0].split('=');
+      if (value) jar.set(name, value);
+      else jar.delete(name);
+    }
+    return { status: res.status, lines, body: await res.json() };
+  };
+
+  const made = await req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  assert.equal(made.status, 200);
+  // What the browser demands of a "__Host-" cookie: Secure, the whole site, no Domain.
+  for (const line of [...made.lines, ...(await req('POST', '/api/admin/unlock', { password: 'password-ann' })).lines]) {
+    assert.match(line, /^__Host-st_(session|admin)=/);
+    assert.match(line, /; Path=\/;/);
+    assert.match(line, /; Secure/);
+    assert.match(line, /; HttpOnly/);
+    assert.doesNotMatch(line, /Domain=/i);
+  }
+  assert.deepEqual([...jar.keys()], ['__Host-st_session', '__Host-st_admin']);
+  assert.equal((await req('GET', '/api/state')).status, 200);
+  assert.equal((await req('GET', '/api/admin/users')).status, 200);
+
+  // The same valid values under the old names (which any sibling site could set) are ignored.
+  const plain = `st_session=${jar.get('__Host-st_session')}; st_admin=${jar.get('__Host-st_admin')}`;
+  assert.equal((await req('GET', '/api/state', null, plain)).status, 401);
+  // A planted plain-name session next to the real one changes nothing.
+  assert.equal((await req('GET', '/api/state', null, `st_session=u0.1.0; __Host-st_session=${jar.get('__Host-st_session')}`)).status, 200);
+
+  // Signing out removes the cookies under both the new and the old names.
+  const out = await req('POST', '/api/logout');
+  const cleared = out.lines.map((l) => l.split('=')[0]);
+  for (const name of ['__Host-st_session', 'st_session', '__Host-st_admin', 'st_admin', '__Host-st_pending', 'st_pending']) assert.ok(cleared.includes(name), name);
+  assert.ok(out.lines.every((l) => l.includes('Max-Age=0')));
+});
+
+test('http: the guided tour is offered until it is finished, and that is remembered', async (t) => {
+  const { setupCode, client } = await serve(t);
+  const ann = client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  assert.equal((await ann.req('GET', '/api/state')).body.settings.tourDone, false);
+  assert.equal((await ann.req('PUT', '/api/settings', { tourDone: true })).body.settings.tourDone, true);
+  // Saving another setting does not bring it back.
+  assert.equal((await ann.req('PUT', '/api/settings', { region: 'NO' })).body.settings.tourDone, true);
 });
