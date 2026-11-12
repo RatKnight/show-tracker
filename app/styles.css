@@ -53,8 +53,13 @@ a { color: inherit; }
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; gap: 10px; }
-.brand h1 { font-size: 18px; }
+.brand {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  font: inherit; color: inherit; background: none; border: 0; padding: 4px 6px; margin: -4px -6px; border-radius: 8px;
+}
+.brand:hover .name { text-decoration: underline; }
+.brand:focus-visible { outline: 2px solid var(--accent); }
+.brand .name { font-size: 18px; font-weight: 700; }
 .logo {
   display: grid; place-items: center;
   width: 30px; height: 30px; border-radius: 8px;
@@ -238,3 +243,13 @@ h2 .today { color: var(--accent); }
 .tile .reason { color: var(--accent); font-size: 13px; }
 .tile .badges { margin-top: 4px; }
 .tile .actions { margin-top: auto; padding-top: 8px; }
+
+/* ---------- watched / timing ---------- */
+.btn.done { color: var(--good); border-color: transparent; background: none; }
+.btn.quiet[aria-pressed="true"] { color: var(--warn); }
+.field select {
+  font: inherit; font-weight: 400; color: var(--text); width: 100%;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px;
+}
+.pair { display: flex; gap: 12px; }
+.pair .field { flex: 1; }

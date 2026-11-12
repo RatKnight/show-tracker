@@ -1,6 +1,7 @@
 // The part that runs around the clock: keeps schedules fresh and raises alerts.
 import { collectAlerts, myStreams } from '../app/js/core.js';
 import { computeDiscover } from './discover.js';
+import { localClock, inQuietHours, summarize } from './timing.js';
 
 const MAX_ALERTS = 100;
 export const REFRESH_EVERY = 30 * 60 * 1000;
@@ -44,10 +45,69 @@ export function createTracker({ store, sources, send, now = Date.now }) {
         url: mine[0]?.url || show.url,
         image: show.image,
         at: ep.airsAt,
+        showKey: show.key,
       };
     });
-    await deliver(messages);
+    queue(messages);
+    await flush();
     return fresh;
+  }
+
+  /** Heads-up shortly before an episode airs, when the user asked for one. */
+  async function checkReminders() {
+    const lead = (data.settings.remindMinutes || 0) * 60 * 1000;
+    if (!lead) return;
+    const done = new Set(data.reminded);
+    const due = [];
+    for (const show of Object.values(data.shows)) {
+      for (const ep of show.episodes) {
+        if (ep.dateOnly || done.has(ep.id) || ep.airsAt <= now() || ep.airsAt - lead > now()) continue;
+        data.reminded.push(ep.id);
+        if (!data.muted.includes(show.key)) due.push({ show, ep });
+      }
+    }
+    if (!due.length) return;
+    data.reminded = data.reminded.slice(-2000);
+    store.save();
+    // Reminders are only useful right now, so they skip the digest but respect quiet hours.
+    const { hour } = localClock(now(), data.settings.timeZone);
+    if (inQuietHours(hour, data.settings.quietStart, data.settings.quietEnd)) return;
+    await sendNow(
+      due.map(({ show, ep }) => ({
+        title: show.title,
+        body: `${ep.label} airs in ${Math.max(1, Math.round((ep.airsAt - now()) / 60000))} minutes`,
+        url: show.url,
+        image: show.image,
+        at: ep.airsAt,
+      })),
+    );
+  }
+
+  /** Hold messages for delivery; muted shows are dropped here. */
+  function queue(messages) {
+    const wanted = messages.filter((m) => !data.muted.includes(m.showKey));
+    if (!wanted.length) return;
+    data.outbox.push(...wanted.map(({ showKey, ...m }) => m));
+    data.outbox = data.outbox.slice(-200);
+    store.save();
+  }
+
+  /** Send what is waiting, unless quiet hours or the digest schedule say to hold it. */
+  async function flush() {
+    const s = data.settings;
+    const { hour, day } = localClock(now(), s.timeZone);
+    if (inQuietHours(hour, s.quietStart, s.quietEnd)) return;
+    const digest = s.alertMode === 'digest';
+    if (digest) {
+      // One send per day, at the first check on or after the chosen hour.
+      if (hour < s.digestHour || data.lastDigestDay === day) return;
+      data.lastDigestDay = day;
+      store.save();
+    }
+    if (!data.outbox.length) return;
+    const batch = data.outbox.splice(0);
+    store.save();
+    await sendNow(batch.length > 1 && (digest || batch.length > 5) ? [summarize(batch)] : batch);
   }
 
   function pushAlert(entry) {
@@ -55,7 +115,7 @@ export function createTracker({ store, sources, send, now = Date.now }) {
     data.alerts.length = Math.min(data.alerts.length, MAX_ALERTS);
   }
 
-  async function deliver(messages) {
+  async function sendNow(messages) {
     const errors = await send(data.settings, messages);
     if (errors.length) {
       data.lastError = `Alert delivery failed — ${errors.join('; ')}`;
@@ -88,7 +148,7 @@ export function createTracker({ store, sources, send, now = Date.now }) {
     }
     store.save();
     if (!silent && news.length) {
-      await deliver(
+      queue(
         news.map((s) => ({
           title: s.title,
           body: `New season of ${s.from} ${s.status === 'Airing' ? 'is airing' : 'announced'}${s.note ? ` — ${s.note.toLowerCase()}` : ''}`,
@@ -97,6 +157,7 @@ export function createTracker({ store, sources, send, now = Date.now }) {
           at: now(),
         })),
       );
+      await flush();
     }
   }
 
@@ -144,6 +205,7 @@ export function createTracker({ store, sources, send, now = Date.now }) {
 
   return {
     checkAlerts,
+    flush,
     refreshDiscover,
     /** Concurrent callers share one refresh. */
     refresh() {
@@ -165,6 +227,7 @@ export function createTracker({ store, sources, send, now = Date.now }) {
     removeShow(key) {
       const gone = data.shows[key];
       delete data.shows[key];
+      data.muted = data.muted.filter((k) => k !== key);
       store.save();
       if (gone?.source === 'anilist') discoverSoon();
     },
@@ -178,6 +241,9 @@ export function createTracker({ store, sources, send, now = Date.now }) {
       } else {
         await checkAlerts();
       }
+      await checkReminders();
+      // Releases anything held back by quiet hours or waiting for the digest.
+      await flush();
       // Suggestions change slowly: rebuild twice a day, retrying hourly on failure.
       const discoverStale = now() - (data.discover?.updatedAt || 0) > DISCOVER_EVERY;
       if (discoverStale && now() - lastDiscoverAttempt > 60 * 60 * 1000) {
