@@ -20,6 +20,10 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
 - **Alerts** – when an episode of a tracked show airs, the server sends a push
   through [ntfy](https://ntfy.sh) and/or a Discord webhook, and lists it in the
   Alerts tab. Set the channels up under *Settings*.
+- **Watched tracking** – recently aired episodes show a *Mark watched* button, and
+  anything you have not watched yet is listed first.
+- **Alert timing** – send alerts as episodes air or as one daily summary, set quiet
+  hours, get a heads-up before an episode airs, and mute individual shows.
 - **Calendar feed** – a private `.ics` address (under *Settings*) you can subscribe
   to from Google Calendar, Outlook or Apple Calendar.
 - **Streaming services** – each show is tagged with where it streams. Your services

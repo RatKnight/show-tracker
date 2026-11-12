@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '' };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', watched: [], muted: [] };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -135,7 +135,8 @@ function thumb(show) {
   return src ? h('img', { class: 'thumb', src, alt: '', loading: 'lazy' }) : h('div', { class: 'thumb' });
 }
 
-function episodeRow({ show, ep }, { showDate = false, unread = false } = {}) {
+function episodeRow({ show, ep }, { showDate = false, unread = false, watch = false } = {}) {
+  const seen = watch && state.watched.includes(ep.id);
   const now = Date.now();
   const sub = [ep.label, ep.name && ep.name !== ep.label ? `· ${ep.name}` : null].filter(Boolean).join(' ');
   return h(
@@ -144,7 +145,23 @@ function episodeRow({ show, ep }, { showDate = false, unread = false } = {}) {
     h('div', { class: 'when' }, showDate ? fmtShortDay.format(ep.airsAt) : timeOf(ep), h('small', {}, showDate ? timeOf(ep) : ep.airsAt > now ? formatCountdown(ep.airsAt - now) : 'aired')),
     thumb(show),
     h('div', { class: 'body' }, h('div', { class: 'title' }, link(show.url, show.title)), h('div', { class: 'sub' }, sub)),
-    h('div', { class: 'side' }, badges(show)),
+    h(
+      'div',
+      { class: 'side' },
+      badges(show),
+      watch &&
+        h(
+          'button',
+          {
+            class: `btn${seen ? ' done' : ''}`,
+            type: 'button',
+            'aria-pressed': String(seen),
+            title: seen ? 'Mark as not watched' : 'Mark as watched',
+            onclick: () => act('POST', '/api/watched', { ids: [ep.id], watched: !seen }),
+          },
+          seen ? '✓ Watched' : 'Mark watched',
+        ),
+    ),
   );
 }
 
@@ -159,9 +176,10 @@ function viewUpcoming() {
     return empty('Nothing tracked yet', 'Use the search box above to add anime or TV shows. New episodes will show up here.');
   }
   const now = Date.now();
-  const startOfToday = new Date(new Date(now).setHours(0, 0, 0, 0)).getTime();
-  const upcoming = episodesBetween(shows(), startOfToday, now + 60 * DAY).filter((x) => x.ep.airsAt > now || dayKey(x.ep.airsAt) === dayKey(now));
-  const recent = episodesBetween(shows(), now - 7 * DAY, startOfToday).reverse();
+  const upcoming = episodesBetween(shows(), now, now + 60 * DAY);
+  const recent = episodesBetween(shows(), now - 14 * DAY, now).reverse();
+  // "To watch" counts what aired since you started tracking the show.
+  const toWatch = recent.filter(({ show, ep }) => ep.airsAt > (show.addedAt || 0) && !state.watched.includes(ep.id));
 
   const out = [];
   if (!upcoming.length) {
@@ -181,7 +199,20 @@ function viewUpcoming() {
     );
   }
   if (recent.length) {
-    out.push(h('section', {}, h('h2', {}, 'Aired in the last 7 days'), h('div', { class: 'list' }, recent.map((i) => episodeRow(i, { showDate: true })))));
+    const section = h(
+      'section',
+      {},
+      h(
+        'div',
+        { class: 'section-head' },
+        h('h2', {}, toWatch.length ? `Aired recently · ${toWatch.length} to watch` : 'Aired recently'),
+        toWatch.length > 1 && h('button', { class: 'btn', type: 'button', onclick: () => act('POST', '/api/watched', { ids: toWatch.map((x) => x.ep.id) }) }, 'Mark all watched'),
+      ),
+      h('div', { class: 'list' }, recent.map((i) => episodeRow(i, { showDate: true, watch: true, unread: toWatch.includes(i) }))),
+    );
+    // What is waiting to be watched matters more than what is still to come.
+    if (toWatch.length) out.unshift(section);
+    else out.push(section);
   }
   return out;
 }
@@ -446,6 +477,17 @@ function viewShows() {
             {
               class: 'btn quiet',
               type: 'button',
+              'aria-pressed': String(state.muted.includes(show.key)),
+              title: 'Muted shows still appear in the app but send no notifications',
+              onclick: () => act('POST', '/api/shows/mute', { key: show.key, muted: !state.muted.includes(show.key) }),
+            },
+            state.muted.includes(show.key) ? 'Muted — unmute' : 'Mute',
+          ),
+          h(
+            'button',
+            {
+              class: 'btn quiet',
+              type: 'button',
               'aria-label': `Remove ${show.title}`,
               onclick: () => {
                 if (!confirm(`Stop tracking "${show.title}"?`)) return;
@@ -580,6 +622,47 @@ function viewSettings() {
     h(
       'section',
       {},
+      h('h2', {}, 'Alert timing'),
+      (() => {
+        const hours = (id, value, allowOff) =>
+          h(
+            'select',
+            { id, onchange: () => saveTiming() },
+            allowOff && h('option', { value: '', selected: value == null }, 'Off'),
+            Array.from({ length: 24 }, (_, i) => h('option', { value: i, selected: value === i }, new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).format(new Date(2020, 0, 1, i)))),
+          );
+        const pick = (id, value, options) => h('select', { id, onchange: () => saveTiming() }, options.map(([v, label]) => h('option', { value: v, selected: value === v }, label)));
+        const mode = pick('alert-mode', s.alertMode, [['instant', 'As each episode airs'], ['digest', 'Once a day, as a summary']]);
+        const digest = hours('digest-hour', s.digestHour);
+        const qStart = hours('quiet-start', s.quietStart, true);
+        const qEnd = hours('quiet-end', s.quietEnd, true);
+        const remind = pick('remind', s.remindMinutes, [[0, 'No reminder'], [10, '10 minutes before'], [30, '30 minutes before'], [60, '1 hour before']]);
+        const num = (el) => (el.value === '' ? null : Number(el.value));
+        const deviceZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        function saveTiming(extra = {}) {
+          act('PUT', '/api/settings', { alertMode: mode.value, digestHour: num(digest), quietStart: num(qStart), quietEnd: num(qEnd), remindMinutes: Number(remind.value), ...extra });
+        }
+        return h(
+          'div',
+          { class: 'card' },
+          h('label', { class: 'field', for: 'alert-mode' }, 'Send alerts', mode),
+          s.alertMode === 'digest' && h('label', { class: 'field', for: 'digest-hour' }, 'Daily summary at', digest),
+          h('div', { class: 'pair' }, h('label', { class: 'field', for: 'quiet-start' }, 'Quiet hours from', qStart), h('label', { class: 'field', for: 'quiet-end' }, 'until', qEnd)),
+          h('p', { class: 'muted small' }, 'During quiet hours nothing is sent; alerts that built up arrive when they end. Set both to use them.'),
+          h('label', { class: 'field', for: 'remind' }, 'Heads-up before an episode airs', remind),
+          h(
+            'p',
+            { class: 'muted small' },
+            `Times use the time zone ${s.timeZone || 'UTC (not set)'}. `,
+            s.timeZone !== deviceZone && h('button', { class: 'btn', type: 'button', onclick: () => saveTiming({ timeZone: deviceZone }) }, `Use this device’s (${deviceZone})`),
+          ),
+          h('p', { class: 'muted small' }, 'To silence a single show, use Mute on the My shows tab.'),
+        );
+      })(),
+    ),
+    h(
+      'section',
+      {},
       h('h2', {}, 'Calendar feed'),
       h(
         'div',
@@ -688,6 +771,7 @@ function viewAuth() {
           await call('POST', first ? '/api/setup' : '/api/login', first ? { password: pw.value, code: code.value } : { password: pw.value });
           ui.session = { setup: true, authed: true };
           await call('GET', '/api/state');
+          await adoptTimeZone();
           render();
         } catch (err) {
           msg.textContent = err.message;
@@ -861,12 +945,26 @@ document.addEventListener('pointerdown', (e) => {
 // ---------------------------------------------------------------- boot
 
 $('refresh-btn').addEventListener('click', refreshAll);
+$('home').addEventListener('click', () => {
+  if (!ui.session?.authed) return;
+  closeResults();
+  setTab('upcoming');
+  window.scrollTo(0, 0);
+});
+
+/** Quiet hours and the digest need a time zone; take this device's until told otherwise. */
+async function adoptTimeZone() {
+  if (ui.session?.authed && !state.settings.timeZone) {
+    await call('PUT', '/api/settings', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }).catch(() => {});
+  }
+}
 
 async function boot() {
   render();
   try {
     ui.session = await call('GET', '/api/session');
     if (ui.session.authed) await call('GET', '/api/state');
+    await adoptTimeZone();
   } catch (e) {
     ui.session = { setup: true, authed: false };
     ui.error = e.message;

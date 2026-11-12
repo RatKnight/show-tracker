@@ -8,6 +8,7 @@ import { openStore } from '../server/store.js';
 import { createTracker } from '../server/tracker.js';
 import { buildIcs } from '../server/ics.js';
 import { computeDiscover } from '../server/discover.js';
+import { localClock, inQuietHours, summarize } from '../server/timing.js';
 import { validateChannels, parseNtfy, ntfyPayloads, discordPayloads } from '../server/notify.js';
 import { hashPassword, checkPassword, sessionCookie, hasSession } from '../server/auth.js';
 import { DAY } from '../app/js/core.js';
@@ -246,7 +247,26 @@ test('http api: setup, login, add, settings, feed', async (t) => {
   assert.equal((await req('PUT', '/api/settings', { discordWebhook: 'https://example.com/hook' })).status, 400);
   assert.equal((await req('POST', '/api/test-alert')).status, 400);
   const saved = await req('PUT', '/api/settings', { services: ['hidive', 'bogus'], ntfyUrl: 'https://ntfy.sh/topic-abc' });
-  assert.deepEqual(saved.body.settings, { services: ['hidive'], ntfyUrl: 'https://ntfy.sh/topic-abc', discordWebhook: '' });
+  assert.deepEqual(
+    [saved.body.settings.services, saved.body.settings.ntfyUrl, saved.body.settings.discordWebhook],
+    [['hidive'], 'https://ntfy.sh/topic-abc', ''],
+  );
+  const tuned = await req('PUT', '/api/settings', { alertMode: 'digest', digestHour: 7, quietStart: 22, quietEnd: 99, remindMinutes: 30, timeZone: 'America/Chicago' });
+  assert.deepEqual(
+    [tuned.body.settings.alertMode, tuned.body.settings.digestHour, tuned.body.settings.quietStart, tuned.body.settings.quietEnd, tuned.body.settings.remindMinutes, tuned.body.settings.timeZone],
+    ['digest', 7, 22, null, 30, 'America/Chicago'],
+  );
+  assert.equal((await req('PUT', '/api/settings', { timeZone: 'Not/AZone', remindMinutes: 7, alertMode: 'x' })).body.settings.timeZone, 'America/Chicago');
+  await req('PUT', '/api/settings', { alertMode: 'instant', quietStart: null, quietEnd: null });
+
+  let st = await req('POST', '/api/watched', { ids: ['anilist:5:1', 'anilist:5:2'] });
+  assert.deepEqual(st.body.watched, ['anilist:5:1', 'anilist:5:2']);
+  st = await req('POST', '/api/watched', { ids: ['anilist:5:1'], watched: false });
+  assert.deepEqual(st.body.watched, ['anilist:5:2']);
+  assert.equal((await req('POST', '/api/watched', { ids: 'nope' })).status, 400);
+  assert.deepEqual((await req('POST', '/api/shows/mute', { key: 'anilist:5' })).body.muted, ['anilist:5']);
+  assert.equal((await req('POST', '/api/shows/mute', { key: 'anilist:404' })).status, 400);
+  assert.deepEqual((await req('POST', '/api/shows/mute', { key: 'anilist:5', muted: false })).body.muted, []);
   assert.equal((await req('POST', '/api/test-alert')).status, 200);
   assert.equal(sent.length, 1);
 
@@ -367,4 +387,86 @@ test('tracker alerts for a newly announced season, but not on the first scan', a
 
   await tracker.refreshDiscover();
   assert.equal(sent.length, 1, 'announced once');
+});
+
+test('timing helpers', () => {
+  const t = Date.UTC(2026, 10, 12, 3, 30); // 03:30 UTC = 21:30 the previous day in Chicago
+  assert.deepEqual(localClock(t, 'America/Chicago'), { hour: 21, day: '2026-11-11' });
+  assert.deepEqual(localClock(t, ''), { hour: 3, day: '2026-11-12' });
+  assert.deepEqual(localClock(t, 'Nope/Nope'), { hour: 3, day: '2026-11-12' });
+  assert.ok(inQuietHours(23, 22, 7) && inQuietHours(3, 22, 7) && !inQuietHours(7, 22, 7) && !inQuietHours(12, 22, 7));
+  assert.ok(inQuietHours(13, 12, 14) && !inQuietHours(14, 12, 14));
+  assert.ok(!inQuietHours(3, null, null) && !inQuietHours(3, 5, 5));
+  const sum = summarize(Array.from({ length: 17 }, (_, i) => ({ title: `T${i}`, body: 'Episode 1 is out', at: i })));
+  assert.equal(sum.title, '17 new on your list');
+  assert.equal(sum.body.split('\n').length, 16);
+});
+
+test('quiet hours hold alerts, the digest sends once a day, muted shows stay silent', async () => {
+  const start = Date.UTC(2026, 10, 12, 2, 0); // 02:00 UTC
+  const clock = { t: start };
+  const sent = [];
+  const store = openStore(tmp());
+  const sources = fakeSources(clock);
+  // Episode 2 of every show airs one minute after `start`.
+  sources.fetchAnime = async (ids) => ids.map((id) => fakeShow(id, { t: start }));
+  const tracker = createTracker({ store, sources, send: async (_s, m) => (sent.push(m), []), now: () => clock.t });
+  Object.assign(store.data.settings, { timeZone: 'UTC', quietStart: 1, quietEnd: 6 });
+  await tracker.addShow('anilist', 1);
+  await tracker.addShow('anilist', 2);
+  await tracker.addShow('anilist', 3);
+  store.data.muted = ['anilist:3'];
+
+  clock.t = start + 5 * 60_000; // 02:05, inside quiet hours
+  await tracker.tick();
+  assert.equal(sent.length, 0, 'held during quiet hours');
+  assert.equal(store.data.alerts.length, 3, 'but listed in the app, muted show included');
+  assert.equal(store.data.outbox.length, 2, 'muted show is not queued');
+
+  clock.t = Date.UTC(2026, 10, 12, 6, 1); // quiet hours over
+  await tracker.tick();
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].map((m) => m.title).sort(), ['Show 1', 'Show 2']);
+  assert.equal(sent[0][0].showKey, undefined);
+
+  // Digest mode: nothing until the digest hour, then one combined message.
+  Object.assign(store.data.settings, { alertMode: 'digest', digestHour: 8, quietStart: null, quietEnd: null });
+  store.data.outbox.push({ title: 'A', body: 'Episode 1 is out', at: 1 }, { title: 'B', body: 'Episode 2 is out', at: 2 });
+  clock.t = Date.UTC(2026, 10, 12, 7, 30);
+  await tracker.flush();
+  assert.equal(sent.length, 1);
+  clock.t = Date.UTC(2026, 10, 12, 8, 0);
+  await tracker.flush();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].length, 1);
+  assert.equal(sent[1][0].title, '2 new on your list');
+  store.data.outbox.push({ title: 'C', body: 'Episode 3 is out', at: 3 });
+  clock.t = Date.UTC(2026, 10, 12, 15, 0);
+  await tracker.flush();
+  assert.equal(sent.length, 2, 'waits for tomorrow');
+  clock.t = Date.UTC(2026, 10, 13, 8, 2);
+  await tracker.flush();
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2][0].title, 'C', 'a single item is sent as itself');
+});
+
+test('reminders fire once, shortly before airing', async () => {
+  const start = Date.UTC(2026, 10, 12, 12, 0);
+  const clock = { t: start };
+  const sent = [];
+  const store = openStore(tmp());
+  const sources = fakeSources(clock);
+  sources.fetchAnime = async (ids) => ids.map((id) => fakeShow(id, { t: start }, { episodes: [{ id: `anilist:${id}:9`, label: 'Episode 9', airsAt: start + 45 * 60_000 }] }));
+  const tracker = createTracker({ store, sources, send: async (_s, m) => (sent.push(...m), []), now: () => clock.t });
+  store.data.settings.remindMinutes = 30;
+  await tracker.addShow('anilist', 1);
+  await tracker.tick();
+  assert.equal(sent.length, 0, 'too early');
+  clock.t = start + 16 * 60_000;
+  await tracker.tick();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body, 'Episode 9 airs in 29 minutes');
+  clock.t += 60_000;
+  await tracker.tick();
+  assert.equal(sent.length, 1, 'once only');
 });
