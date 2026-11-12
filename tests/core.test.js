@@ -12,6 +12,7 @@ import {
   dayKey,
   monthGrid,
   formatCountdown,
+  animeSeason,
 } from '../app/js/core.js';
 
 const NOW = new Date(2026, 10, 12, 12, 0).getTime();
@@ -160,4 +161,17 @@ test('formatCountdown', () => {
   assert.equal(formatCountdown((5 * 60 + 12) * 60000), 'in 5h 12m');
   assert.equal(formatCountdown(3 * DAY + 4 * 3600000 + 60000), 'in 3d 4h');
   assert.equal(formatCountdown(2 * DAY), 'in 2d');
+});
+
+test('animeSeason', () => {
+  assert.deepEqual(animeSeason(new Date(2026, 10, 12)), { season: 'FALL', year: 2026 });
+  assert.deepEqual(animeSeason(new Date(2026, 10, 12), 1), { season: 'WINTER', year: 2027 });
+  assert.deepEqual(animeSeason(new Date(2026, 0, 1)), { season: 'WINTER', year: 2026 });
+  assert.deepEqual(animeSeason(new Date(2026, 5, 30), 1), { season: 'SUMMER', year: 2026 });
+});
+
+test('normalizeAnilist falls back to the next airing episode and keeps genres/score', () => {
+  const show = normalizeAnilist({ ...media, genres: ['Adventure', 'Drama'], averageScore: 91, nextAiringEpisode: { episode: 9, airingAt: sec(NOW + DAY) } }, undefined, NOW);
+  assert.deepEqual(show.episodes.map((e) => e.label), ['Episode 9']);
+  assert.deepEqual([show.genres, show.score, show.format], [['Adventure', 'Drama'], 91, 'TV']);
 });

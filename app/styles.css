@@ -222,3 +222,19 @@ h2 .today { color: var(--accent); }
 .auth h3 { font-size: 18px; }
 .auth .field { margin-top: 0; }
 .signed-out .search, .signed-out .top-actions, .signed-out .tabs { display: none; }
+
+/* ---------- discover ---------- */
+.subnav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 20px; }
+.subnav .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.subnav .filter { display: flex; align-items: center; gap: 6px; margin-left: auto; cursor: pointer; color: var(--muted); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.tile { display: flex; gap: 12px; padding: 12px; background: var(--panel); border-radius: 10px; min-width: 0; }
+.tile .thumb { width: 64px; height: 91px; }
+.tile .body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.tile .title { font-weight: 600; }
+.tile .title a { text-decoration: none; }
+.tile .title a:hover { text-decoration: underline; }
+.tile .sub { color: var(--muted); font-size: 13px; }
+.tile .reason { color: var(--accent); font-size: 13px; }
+.tile .badges { margin-top: 4px; }
+.tile .actions { margin-top: auto; padding-top: 8px; }

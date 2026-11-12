@@ -49,13 +49,16 @@ const ANILIST_STATUS = {
   CANCELLED: 'Cancelled',
   HIATUS: 'On hiatus',
 };
+const ANILIST_FORMAT = { TV: 'TV', TV_SHORT: 'TV short', MOVIE: 'Movie', ONA: 'Web series', OVA: 'OVA', SPECIAL: 'Special' };
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /**
  * Turn an AniList Media object plus its airing-schedule nodes into our show shape.
  * `schedule` is a list of { episode, airingAt (unix seconds) }.
  */
-export function normalizeAnilist(media, schedule = [], now = Date.now()) {
+export function normalizeAnilist(media, schedule, now = Date.now()) {
+  // Without a full schedule, the next episode (when the API sent it) is still worth showing.
+  schedule ??= media.nextAiringEpisode ? [{ episode: media.nextAiringEpisode.episode, airingAt: media.nextAiringEpisode.airingAt }] : [];
   const key = `anilist:${media.id}`;
   const isMovie = media.format === 'MOVIE';
   const episodes = schedule
@@ -103,10 +106,20 @@ export function normalizeAnilist(media, schedule = [], now = Date.now()) {
     url: media.siteUrl || null,
     status: ANILIST_STATUS[media.status] || 'Unknown',
     year: sd.year || null,
+    format: ANILIST_FORMAT[media.format] || null,
+    genres: (media.genres || []).slice(0, 4),
+    score: media.averageScore || null,
     note,
     streams,
     episodes,
   };
+}
+
+/** Which anime season a date falls in, and the one after it. */
+export function animeSeason(date = new Date(), offset = 0) {
+  const names = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
+  const index = Math.floor(date.getMonth() / 3) + offset;
+  return { season: names[((index % 4) + 4) % 4], year: date.getFullYear() + Math.floor(index / 4) };
 }
 
 const TVMAZE_STATUS = {
