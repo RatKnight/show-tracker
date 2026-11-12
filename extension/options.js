@@ -18,6 +18,10 @@ $('form').addEventListener('submit', async (e) => {
   } catch {
     return say('That address does not look right.', 'error');
   }
+  const { protocol, hostname } = new URL(origin);
+  if (protocol !== 'https:' && !(protocol === 'http:' && ['localhost', '127.0.0.1'].includes(hostname))) {
+    return say('The address must start with https://, so your access token is never sent unprotected.', 'error');
+  }
   const token = $('token').value.trim();
   // The browser asks you to let the extension talk to that one address.
   // (The streaming sites are included because some Firefox versions do not grant them at install.)

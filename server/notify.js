@@ -1,5 +1,6 @@
 // Alert delivery: ntfy (phone/desktop push) and a Discord webhook.
-import { lookup } from 'node:dns/promises';
+import { lookup } from 'node:dns';
+import { request } from 'node:https';
 import { isIP } from 'node:net';
 
 const DISCORD_RE = /^https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/;
@@ -70,14 +71,45 @@ export function isPrivateAddress(ip) {
 }
 
 /**
- * The ntfy address is chosen by each user, so it must not be usable to make
- * this server call machines on its own network.
+ * A DNS lookup that refuses private addresses. Handed to the connection itself,
+ * so the address that is checked is the address that is connected to: a host
+ * name cannot answer "public" for the check and "internal" a moment later.
  */
-async function assertPublicHost(url) {
-  const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
-  const addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true }).catch(() => []);
-  if (!addresses.length) throw new Error('address not found');
-  if (addresses.some((a) => isPrivateAddress(a.address))) throw new Error('that address is on a private network and is not allowed');
+function publicLookup(hostname, options, callback) {
+  lookup(hostname, options, (err, address, family) => {
+    if (err) return callback(err);
+    const all = Array.isArray(address) ? address : [{ address, family }];
+    if (!all.length || all.some((a) => isPrivateAddress(a.address))) {
+      return callback(Object.assign(new Error('that address is on a private network and is not allowed'), { code: 'EPRIVATE' }));
+    }
+    callback(null, address, family);
+  });
+}
+
+/**
+ * POST JSON to an address a user chose (their ntfy server), never following
+ * redirects and never reaching into this server's own network.
+ */
+function postPublic(url, body, what) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const host = target.hostname.replace(/^\[|\]$/g, '');
+    // A literal IP address skips DNS, so it is checked directly.
+    if (isIP(host) && isPrivateAddress(host)) return reject(new Error('that address is on a private network and is not allowed'));
+    const payload = JSON.stringify(body);
+    const req = request(
+      target,
+      { method: 'POST', lookup: publicLookup, timeout: 15000, headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+      (res) => {
+        res.resume();
+        res.on('error', reject);
+        res.on('end', () => (res.statusCode >= 200 && res.statusCode < 300 ? resolve() : reject(new Error(`${what} replied ${res.statusCode}`))));
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error(`${what} did not answer in time`)));
+    req.on('error', (e) => reject(e.code === 'ENOTFOUND' ? new Error('address not found') : e));
+    req.end(payload);
+  });
 }
 
 async function post(url, body, what) {
@@ -102,8 +134,7 @@ export async function sendAlerts(settings, messages) {
   if (settings.ntfyUrl) {
     try {
       const { server } = parseNtfy(settings.ntfyUrl);
-      await assertPublicHost(server);
-      for (const p of ntfyPayloads(settings.ntfyUrl, messages)) await post(server, p, 'ntfy');
+      for (const p of ntfyPayloads(settings.ntfyUrl, messages)) await postPublic(server, p, 'ntfy');
     } catch (e) {
       errors.push(`ntfy: ${e.message}`);
     }

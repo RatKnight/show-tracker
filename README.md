@@ -73,7 +73,7 @@ every redeploy.
 
 ```
 docker build -t show-tracker .
-docker run -d -p 3000:3000 -v show-tracker-data:/data -e DATA_KEY="$(openssl rand -hex 32)" show-tracker
+docker run -d -p 3000:3000 -v show-tracker-data:/data -e DATA_KEY="$(openssl rand -hex 32)" -e TRUST_PROXY=1 show-tracker
 ```
 
 Environment variables:
@@ -81,6 +81,7 @@ Environment variables:
 | Variable | Purpose |
 |---|---|
 | `DATA_KEY` | Encrypts the data file at rest (AES-256-GCM). At least 32 characters. **Keep a copy somewhere safe: without it the data cannot be read.** If unset, data is stored unencrypted and the admin sees a warning. |
+| `TRUST_PROXY` | Set to `1` when the app runs behind a reverse proxy (Coolify, Traefik, nginx…). Only then are the proxy's headers believed for the visitor's address, the public host name and HTTPS. Without it behind a proxy, sign-in cookies are not marked Secure and every visitor shares one attempt limit. |
 | `PUBLIC_URL` | The site's public `https://` address. Passkeys are bound to it, and links in e-mails point to it. |
 | `RESEND_API_KEY`, `MAIL_FROM` | Optional e-mail password recovery through [Resend](https://resend.com). Needs `PUBLIC_URL` too. An API key with sending access, and a sender on a verified domain (e.g. `Show Tracker <noreply@example.com>`). |
 | `TMDB_API_KEY` | Optional. A TMDB “API Read Access Token”; switches on movie search, US release dates and the cinema list. |
