@@ -14,6 +14,9 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
 - **Upcoming** – every scheduled episode for the next 60 days, grouped by day, in
   your local time, plus what aired in the last week.
 - **Calendar** – a month view; click a day to see its episodes.
+- **Discover** – new seasons of anime you track (followed along the whole sequel
+  chain, with an alert when one is announced), recommendations based on your list,
+  and the most popular shows of this season and next, filterable to your services.
 - **Alerts** – when an episode of a tracked show airs, the server sends a push
   through [ntfy](https://ntfy.sh) and/or a Discord webhook, and lists it in the
   Alerts tab. Set the channels up under *Settings*.

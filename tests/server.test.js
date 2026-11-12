@@ -7,6 +7,7 @@ import { createApp } from '../server.js';
 import { openStore } from '../server/store.js';
 import { createTracker } from '../server/tracker.js';
 import { buildIcs } from '../server/ics.js';
+import { computeDiscover } from '../server/discover.js';
 import { validateChannels, parseNtfy, ntfyPayloads, discordPayloads } from '../server/notify.js';
 import { hashPassword, checkPassword, sessionCookie, hasSession } from '../server/auth.js';
 import { DAY } from '../app/js/core.js';
@@ -50,8 +51,26 @@ function fakeSources(clock) {
     async searchTv() {
       return [];
     },
+    related: new Map(),
+    async fetchRelated(ids) {
+      return new Map(ids.map((id) => [id, this.related.get(id) || { sequels: [], recs: [] }]));
+    },
+    async fetchSeason(season, year) {
+      return [fakeShow(900, clock, { title: `${season} ${year}` })];
+    },
   };
 }
+
+const media = (id, title, status = 'FINISHED', extra = {}) => ({
+  id,
+  type: 'ANIME',
+  format: 'TV',
+  status,
+  title: { english: title, romaji: title },
+  startDate: { year: 2027, month: 4, day: null },
+  externalLinks: [],
+  ...extra,
+});
 
 test('tracker alerts once per episode, only for episodes aired after adding', async () => {
   const clock = { t: Date.UTC(2026, 10, 12) };
@@ -163,7 +182,9 @@ test('http api: setup, login, add, settings, feed', async (t) => {
   const clock = { t: Date.now() };
   const dir = tmp();
   const sent = [];
-  const { server, setupCode } = createApp({ dataDir: dir, sources: fakeSources(clock), send: async (_s, m) => (sent.push(...m), []) });
+  const fake = fakeSources(clock);
+  const { related } = fake;
+  const { server, setupCode, tracker } = createApp({ dataDir: dir, sources: fake, send: async (_s, m) => (sent.push(...m), []) });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -210,6 +231,17 @@ test('http api: setup, login, add, settings, feed', async (t) => {
   assert.equal(added.body.secret, undefined);
 
   assert.equal((await req('GET', '/api/search?source=anime&q=frieren')).body[0].title, 'frieren');
+
+  const season = await req('GET', '/api/season?which=next');
+  assert.match(season.body.season, /^(WINTER|SPRING|SUMMER|FALL)$/);
+  assert.equal(season.body.list.length, 1);
+  related.set(5, { sequels: [media(60, 'Five S2', 'RELEASING')], recs: [{ rating: 5, media: media(61, 'Rec') }] });
+  await tracker.refreshDiscover({ silent: true });
+  let disc = await req('GET', '/api/discover');
+  assert.deepEqual([disc.body.sequels.map((x) => x.key), disc.body.recs.map((x) => x.key)], [['anilist:60'], ['anilist:61']]);
+  assert.equal((await req('POST', '/api/discover/dismiss', { key: '../x' })).status, 400);
+  disc = await req('POST', '/api/discover/dismiss', { key: 'anilist:61' });
+  assert.deepEqual(disc.body.recs, []);
 
   assert.equal((await req('PUT', '/api/settings', { discordWebhook: 'https://example.com/hook' })).status, 400);
   assert.equal((await req('POST', '/api/test-alert')).status, 400);
@@ -288,4 +320,51 @@ test('http hardening: malformed requests do not crash, guesses are limited', asy
   for (let i = 0; i < 8; i++) assert.equal((await post('/api/login', { password: 'wrong' }, '203.0.113.3')).status, 401);
   assert.equal((await post('/api/login', { password: 'long enough pw' }, '203.0.113.3')).status, 429);
   assert.equal((await post('/api/login', { password: 'long enough pw' }, '203.0.113.4')).status, 200);
+});
+
+test('discover follows sequel chains and ranks recommendations', async () => {
+  const clock = { t: Date.UTC(2026, 10, 12) };
+  const sources = fakeSources(clock);
+  // Tracked: 1 and 2. Chain: 1 -> 10 (finished) -> 11 (upcoming). 2 -> 1 (tracked, ignored).
+  sources.related.set(1, { sequels: [media(10, 'One S2')], recs: [{ rating: 9, media: media(50, 'Rec A') }, { rating: 5, media: media(51, 'Rec B') }, { rating: 4, media: media(10, 'One S2') }] });
+  sources.related.set(2, { sequels: [media(1, 'One')], recs: [{ rating: 3, media: media(51, 'Rec B') }, { rating: 2, media: media(1, 'One') }] });
+  sources.related.set(10, { sequels: [media(11, 'One S3', 'NOT_YET_RELEASED')], recs: [] });
+  sources.related.set(11, { sequels: [media(10, 'One S2')], recs: [] }); // a loop must not hang
+  const shows = [fakeShow(1, clock, { title: 'One' }), fakeShow(2, clock, { title: 'Two' }), { ...fakeShow(3, clock), source: 'tvmaze' }];
+
+  const d = await computeDiscover({ shows, sources, now: clock.t });
+  assert.deepEqual(d.sequels.map((s) => [s.key, s.from, s.fresh]), [
+    ['anilist:11', 'One', true],
+    ['anilist:10', 'One', false],
+  ]);
+  assert.equal(d.sequels[0].note, 'Expected Apr 2027');
+  // Rec B is recommended by both tracked shows, so it outranks Rec A; tracked shows and sequels are excluded.
+  assert.deepEqual(d.recs.map((r) => [r.key, r.because]), [
+    ['anilist:51', ['One', 'Two']],
+    ['anilist:50', ['One']],
+  ]);
+  assert.deepEqual(await computeDiscover({ shows: [], sources, now: clock.t }), { sequels: [], recs: [] });
+});
+
+test('tracker alerts for a newly announced season, but not on the first scan', async () => {
+  const clock = { t: Date.UTC(2026, 10, 12) };
+  const sent = [];
+  const store = openStore(tmp());
+  const sources = fakeSources(clock);
+  sources.related.set(1, { sequels: [media(10, 'One S2', 'NOT_YET_RELEASED')], recs: [{ rating: 5, media: media(50, 'Rec A') }] });
+  const tracker = createTracker({ store, sources, send: async (_s, m) => (sent.push(...m), []), now: () => clock.t });
+  await tracker.addShow('anilist', 1);
+  await tracker.refreshDiscover();
+  assert.equal(sent.length, 0, 'seasons that already existed are not announced');
+  assert.deepEqual(store.data.discover.sequels.map((s) => s.key), ['anilist:10']);
+
+  sources.related.set(10, { sequels: [media(11, 'One S3', 'NOT_YET_RELEASED')], recs: [] });
+  await tracker.refreshDiscover();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].title, 'One S3');
+  assert.match(sent[0].body, /^New season of Show 1 announced — expected apr 2027$/);
+  assert.equal(store.data.alerts[0].ep.label, 'New season of Show 1');
+
+  await tracker.refreshDiscover();
+  assert.equal(sent.length, 1, 'announced once');
 });

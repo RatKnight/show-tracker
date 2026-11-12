@@ -5,7 +5,7 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SERVICES } from './app/js/core.js';
+import { SERVICES, animeSeason } from './app/js/core.js';
 import { openStore } from './server/store.js';
 import { createTracker } from './server/tracker.js';
 import { hashPassword, checkPassword, sessionCookie, clearCookie, hasSession, safeEqual } from './server/auth.js';
@@ -98,6 +98,18 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, n
     lastError: data.lastError,
     feedToken: data.feedToken,
   });
+
+  /** Suggestions, minus anything now tracked or waved away. */
+  const publicDiscover = () => {
+    const hidden = new Set([...Object.keys(data.shows), ...data.dismissed]);
+    const d = data.discover || { sequels: [], recs: [], updatedAt: 0 };
+    return {
+      sequels: d.sequels.filter((s) => !hidden.has(s.key)),
+      recs: d.recs.filter((s) => !hidden.has(s.key)),
+      updatedAt: d.updatedAt,
+    };
+  };
+  const seasonCache = new Map();
 
   async function api(req, res, url) {
     const reply = (status, body, headers = {}) => {
@@ -193,6 +205,29 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, n
         data.alerts = [];
         store.save();
         return reply(200, publicState());
+
+      case 'GET /api/discover':
+        if (!data.discover) await tracker.refreshDiscover({ silent: true });
+        return reply(200, publicDiscover());
+
+      case 'POST /api/discover/dismiss': {
+        const { key } = await readJson(req);
+        if (typeof key !== 'string' || !/^anilist:\d+$/.test(key)) throw new HttpError(400, 'Unknown show.');
+        if (!data.dismissed.includes(key)) data.dismissed = [...data.dismissed, key].slice(-2000);
+        store.save();
+        return reply(200, publicDiscover());
+      }
+
+      case 'GET /api/season': {
+        const { season, year } = animeSeason(new Date(now()), url.searchParams.get('which') === 'next' ? 1 : 0);
+        const id = `${season}-${year}`;
+        let hit = seasonCache.get(id);
+        if (!hit || now() - hit.at > 6 * 60 * 60 * 1000) {
+          hit = { at: now(), shows: await sources.fetchSeason(season, year, now()) };
+          seasonCache.set(id, hit);
+        }
+        return reply(200, { season, year, list: hit.shows });
+      }
 
       case 'POST /api/password': {
         guardAttempts(req);

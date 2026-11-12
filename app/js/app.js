@@ -12,6 +12,11 @@ const ui = {
   error: null,
   session: null, // { setup, authed } once known
   notice: null,
+  discoverTab: 'foryou',
+  mineOnly: false,
+  discover: null, // { sequels, recs, updatedAt }
+  seasons: {}, // which -> { season, year, list }
+  loading: {},
 };
 
 const shows = () => Object.values(state.shows);
@@ -34,7 +39,14 @@ async function call(method, path, body) {
     render();
   }
   if (!res.ok) throw new Error(json?.error || `Request failed (${res.status})`);
-  if (json && json.shows) state = json;
+  if (json && json.shows) {
+    // The list changed, so suggestions built from it are stale.
+    if (Object.keys(json.shows).length !== Object.keys(state.shows).length) {
+      ui.discover = null;
+      delete ui.loading.discover;
+    }
+    state = json;
+  }
   return json;
 }
 
@@ -254,6 +266,152 @@ function viewCalendar() {
     selected.length ? h('div', { class: 'list' }, selected.map((i) => episodeRow(i))) : h('p', { class: 'muted' }, 'Nothing scheduled.'),
   );
   return [head, grid, detail];
+}
+
+// ---- Discover
+
+const SEASON_NAMES = { WINTER: 'Winter', SPRING: 'Spring', SUMMER: 'Summer', FALL: 'Fall' };
+
+/** Fetch a Discover dataset once; re-renders when it arrives. */
+function load(name, fetcher) {
+  if (ui.loading[name]) return;
+  ui.loading[name] = 'busy';
+  fetcher().then(
+    () => (ui.loading[name] = 'done'),
+    (e) => (ui.loading[name] = `Could not load this: ${e.message}`),
+  ).then(render);
+}
+
+function showCard(show, { reason, dismissable } = {}) {
+  const tracked = Boolean(state.shows[show.key]);
+  const next = nextEpisode(show);
+  const when = next ? `${next.label} · ${fmtShortDay.format(next.airsAt)}` : show.note || show.status;
+  const meta = [show.format, show.year, show.score && `${show.score}%`].filter(Boolean).join(' · ');
+  const add = h('button', { class: `btn${tracked ? '' : ' primary'}`, type: 'button', disabled: tracked }, tracked ? 'Tracking' : 'Track');
+  add.addEventListener('click', async () => {
+    add.disabled = true;
+    add.textContent = 'Adding…';
+    try {
+      await call('POST', '/api/shows', { source: show.source, id: show.id });
+      ui.error = null;
+      render();
+    } catch (e) {
+      add.disabled = false;
+      add.textContent = 'Retry';
+      add.title = e.message;
+    }
+  });
+  return h(
+    'article',
+    { class: 'tile' },
+    thumb(show),
+    h(
+      'div',
+      { class: 'body' },
+      h('div', { class: 'title' }, link(show.url, show.title)),
+      reason && h('div', { class: 'reason' }, reason),
+      h('div', { class: 'sub' }, when),
+      h('div', { class: 'sub' }, [meta, (show.genres || []).slice(0, 3).join(', ')].filter(Boolean).join(' · ')),
+      badges(show),
+      h(
+        'div',
+        { class: 'actions' },
+        add,
+        dismissable &&
+          h(
+            'button',
+            {
+              class: 'btn quiet',
+              type: 'button',
+              onclick: async () => {
+                try {
+                  ui.discover = await call('POST', '/api/discover/dismiss', { key: show.key });
+                } catch (e) {
+                  ui.error = e.message;
+                }
+                render();
+              },
+            },
+            'Not interested',
+          ),
+      ),
+    ),
+  );
+}
+
+function tiles(list, opts) {
+  const mine = state.settings.services;
+  const shown = ui.mineOnly ? list.filter((s) => myStreams(s, mine).length) : list;
+  if (!shown.length) return h('p', { class: 'muted' }, list.length ? 'Nothing here is on your services yet. Untick the filter to see everything.' : 'Nothing to show.');
+  return h('div', { class: 'tiles' }, shown.map((s) => showCard(s, typeof opts === 'function' ? opts(s) : opts)));
+}
+
+function viewDiscover() {
+  const tabs = [
+    ['foryou', 'For you'],
+    ['current', 'This season'],
+    ['next', 'Next season'],
+  ];
+  const bar = h(
+    'div',
+    { class: 'subnav' },
+    tabs.map(([id, label]) =>
+      h(
+        'button',
+        {
+          class: 'btn',
+          type: 'button',
+          'aria-pressed': String(ui.discoverTab === id),
+          onclick: () => {
+            ui.discoverTab = id;
+            render();
+          },
+        },
+        label,
+      ),
+    ),
+    h(
+      'label',
+      { class: 'filter' },
+      h('input', {
+        type: 'checkbox',
+        checked: ui.mineOnly,
+        onchange: (e) => {
+          ui.mineOnly = e.target.checked;
+          render();
+        },
+      }),
+      'Only on my services',
+    ),
+  );
+  const out = [bar];
+  const which = ui.discoverTab;
+
+  if (which === 'foryou') {
+    load('discover', async () => (ui.discover = await call('GET', '/api/discover')));
+    const d = ui.discover;
+    if (!d) return [...out, empty(ui.loading.discover === 'busy' ? 'Finding suggestions…' : 'No suggestions', ui.loading.discover === 'busy' ? '' : ui.loading.discover || '')];
+    if (!shows().some((s) => s.source === 'anilist')) {
+      return [...out, empty('Track some anime first', 'New seasons and recommendations are worked out from the anime on your list.')];
+    }
+    const fresh = d.sequels.filter((s) => s.fresh);
+    const older = d.sequels.filter((s) => !s.fresh);
+    out.push(
+      h('section', {}, h('h2', {}, 'New seasons of shows you track'), fresh.length ? tiles(fresh, (s) => ({ reason: `New season of ${s.from}` })) : h('p', { class: 'muted' }, 'No new seasons announced right now. You will get an alert when one is.')),
+    );
+    if (older.length) out.push(h('section', {}, h('h2', {}, 'Later seasons already out'), tiles(older, (s) => ({ reason: `Follows ${s.from}`, dismissable: true }))));
+    out.push(
+      h('section', {}, h('h2', {}, 'You might like'), d.recs.length ? tiles(d.recs, (s) => ({ reason: `Because you track ${s.because.join(', ')}`, dismissable: true })) : h('p', { class: 'muted' }, 'No recommendations yet.')),
+    );
+    return out;
+  }
+
+  load(`season-${which}`, async () => (ui.seasons[which] = await call('GET', `/api/season?which=${which}`)));
+  const data = ui.seasons[which];
+  const status = ui.loading[`season-${which}`];
+  if (!data) return [...out, empty(status === 'busy' ? 'Loading the season…' : 'Could not load', status === 'busy' ? '' : status || '')];
+  out.push(h('section', {}, h('h2', {}, `${SEASON_NAMES[data.season]} ${data.year} · most popular first`), tiles(data.list)));
+  return out;
 }
 
 function viewShows() {
@@ -551,6 +709,7 @@ function viewAuth() {
 const TABS = [
   ['upcoming', 'Upcoming', viewUpcoming],
   ['calendar', 'Calendar', viewCalendar],
+  ['discover', 'Discover', viewDiscover],
   ['shows', 'My shows', viewShows],
   ['alerts', 'Alerts', viewAlerts],
   ['settings', 'Settings', viewSettings],
@@ -719,7 +878,7 @@ boot();
 // Every minute: pick up new alerts and schedule changes from the server and keep
 // countdowns fresh. Skipped on Settings so typing is never interrupted.
 setInterval(async () => {
-  if (!ui.session?.authed || ui.tab === 'settings') return;
+  if (!ui.session?.authed || ui.tab === 'settings' || ui.tab === 'discover') return;
   await call('GET', '/api/state').catch(() => {});
   render();
 }, 60 * 1000);
