@@ -11,6 +11,7 @@ import { computeDiscover, buildSeries } from '../server/discover.js';
 import { localClock, inQuietHours, summarize } from '../server/timing.js';
 import { buildBackup, readBackup, writeSnapshot } from '../server/backup.js';
 import { createMailer, cleanEmail } from '../server/mail.js';
+import { matchEpisode, normTitle } from '../server/extmatch.js';
 import { generateKeyPairSync, createHash, sign as cryptoSign, randomBytes } from 'node:crypto';
 import { validateChannels, parseNtfy, ntfyPayloads, discordPayloads } from '../server/notify.js';
 import { hashPassword, checkPassword, cleanUsername, sessionCookie, sessionUser, tokenHash } from '../server/auth.js';
@@ -86,6 +87,10 @@ function fakeSources(clock) {
     },
     async fetchMovie(id) {
       return fakeMovie(id, clock);
+    },
+    franchises: {},
+    async fetchFranchise(id) {
+      return this.franchises[id] || { root: `Show ${id}`, offset: 0, index: 1, count: 12 };
     },
     cinemaList: [],
     async fetchCinemaAnime() {
@@ -1029,4 +1034,88 @@ test('http: movie routes, and closed when no movie key is configured', async (t)
   for (const [m, p, b] of [['GET', '/api/search?source=movie&q=totoro'], ['GET', '/api/cinema'], ['POST', '/api/shows', { source: 'tmdb', id: 301 }]]) {
     assert.equal((await ann.req(m, p, b)).status, 400, `${m} ${p}`);
   }
+});
+
+// ---------------------------------------------------------------- browser extension
+
+test('matchEpisode translates a streaming site\'s numbering to tracked episodes', () => {
+  assert.equal(normTitle('SPY×FAMILY: Code – White!'), 'spyxfamilycodewhite');
+  const show = (id, title, franchise, extra = {}) => ({ key: `anilist:${id}`, source: 'anilist', id, title, altTitle: null, franchise, ...extra });
+  const spy = [
+    show(1, 'SPY x FAMILY', { root: 'SPY x FAMILY', offset: 0, index: 1, count: 12 }),
+    show(3, 'SPY x FAMILY Season 2', { root: 'SPY x FAMILY', offset: 25, index: 3, count: 12 }),
+    show(4, 'SPY x FAMILY Season 3', { root: 'SPY x FAMILY', offset: 37, index: 4, count: 13 }),
+  ];
+  const at = (item, shows) => {
+    const hit = matchEpisode(item, shows);
+    return hit && [hit.show.id, hit.number];
+  };
+  // Counted straight through: E42 is the fifth episode of season 3, E5 the fifth of season 1.
+  assert.deepEqual(at({ series: 'SPY x FAMILY', season: null, episode: 42 }, spy), [4, 5]);
+  assert.deepEqual(at({ series: 'spy × family', season: null, episode: 5 }, spy), [1, 5]);
+  assert.deepEqual(at({ series: 'SPY x FAMILY', season: null, episode: 30 }, spy), [3, 5]);
+  // E20 belongs to a season that is not tracked (cour 2): no guess.
+  assert.equal(at({ series: 'SPY x FAMILY', season: null, episode: 20 }, spy), null);
+  assert.equal(at({ series: 'SPY x FAMILY', season: null, episode: 99 }, spy), null);
+
+  // The site names the season and restarts numbering.
+  const cuckoos = [show(10, 'A Couple of Cuckoos', { root: 'A Couple of Cuckoos', offset: 0, index: 1, count: 24 }), show(11, 'A Couple of Cuckoos Season 2', { root: 'A Couple of Cuckoos', offset: 24, index: 2, count: 12 })];
+  assert.deepEqual(at({ series: 'A Couple of Cuckoos', season: 2, episode: 11 }, cuckoos), [11, 11]);
+  assert.deepEqual(at({ series: 'A Couple of Cuckoos', season: null, episode: 24 }, cuckoos), [10, 24]);
+  // Only season 2 tracked, and the site says "S2": still placed.
+  assert.deepEqual(at({ series: 'A Couple of Cuckoos', season: 2, episode: 3 }, [cuckoos[1]]), [11, 3]);
+
+  // Season 1's E18 must not land on a tracked 12-episode season 2.
+  assert.equal(at({ series: 'A Couple of Cuckoos', season: null, episode: 18 }, [cuckoos[1]]), null);
+  // The site splits seasons differently (its "S2" is our third entry): placed when only one fits.
+  assert.deepEqual(at({ series: 'SPY x FAMILY', season: 2, episode: 3 }, [spy[1]]), [3, 3]);
+  // Place among its seasons not looked up yet: no guessing.
+  assert.equal(at({ series: 'Overgeared', season: null, episode: 7 }, [show(20, 'Overgeared', undefined)]), null);
+  assert.deepEqual(at({ series: 'Overgeared', season: null, episode: 7 }, [show(20, 'Overgeared', { root: 'Overgeared', offset: 0, index: 1, count: null })]), [20, 7]);
+  assert.equal(at({ series: 'Totally Different', season: null, episode: 1 }, spy), null);
+  assert.equal(at({ series: 'Spy', season: null, episode: 1 }, spy), null, 'a short prefix is not enough');
+  assert.equal(at({ series: 'SPY x FAMILY', season: null, episode: 0 }, spy), null);
+  assert.equal(at({ series: 'SPY x FAMILY', season: null, episode: 1 }, [{ ...spy[0], source: 'tvmaze' }]), null);
+});
+
+test('http: access tokens and the extension endpoint', async (t) => {
+  const { setupCode, sources, tracker, client, base } = await serve(t);
+  const ann = client('198.51.100.1');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  sources.franchises[4] = { root: 'Show 1', offset: 37, index: 4, count: 13 };
+  // Tracked: "Show 4", which is season 4 of the "Show 1" franchise.
+  await ann.req('POST', '/api/shows', { source: 'anilist', id: 4 });
+
+  const made = (await ann.req('POST', '/api/tokens', { name: 'Firefox' })).body;
+  assert.match(made.token, /^st_[\w-]{20,}$/);
+  assert.deepEqual(made.me.apiTokens.map((x) => [x.name, x.lastUsedAt]), [['Firefox', null]]);
+  assert.ok(!JSON.stringify(made.me).includes(made.token.slice(3)), 'the token is shown once, not listed');
+
+  // The extension talks from another origin, with the token and no cookie.
+  const ext = (method, path, body, token = made.token) =>
+    fetch(base + path, { method, headers: { Authorization: `Bearer ${token}`, Origin: 'moz-extension://abc', 'X-Forwarded-For': '198.51.100.50', ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  assert.deepEqual((await ext('GET', '/api/ext/ping')).body, { ok: true, username: 'ann' });
+  assert.equal((await ext('GET', '/api/ext/ping', null, 'st_' + 'x'.repeat(32))).status, 401);
+  assert.equal((await ext('GET', '/api/state')).status, 401, 'a token opens only the extension routes');
+  assert.equal((await ext('POST', '/api/shows', { source: 'anilist', id: 9 })).status, 403, 'and cannot act as the session');
+
+  const items = [
+    { series: 'Show 1', season: null, episode: 42 },
+    { series: 'Show 1', season: null, episode: 39 },
+    { series: 'Unknown Thing', season: null, episode: 1 },
+    { series: 'Unknown Thing', season: null, episode: 2 },
+  ];
+  let res = await ext('POST', '/api/ext/watched', { items });
+  assert.equal(res.body.pending, 1, 'season lookup has not run yet');
+  await tracker.fillFranchises();
+  res = await ext('POST', '/api/ext/watched', { items });
+  assert.deepEqual(res.body, { received: 4, matched: 2, added: 2, unmatched: [{ series: 'Unknown Thing', count: 2 }], pending: 0 });
+  assert.deepEqual((await ann.req('GET', '/api/state')).body.watched.sort(), ['anilist:4:2', 'anilist:4:5']);
+  assert.equal((await ext('POST', '/api/ext/watched', { items })).body.added, 0, 'sending the same history again changes nothing');
+  assert.equal((await ext('POST', '/api/ext/watched', { items: [{ series: 'x', episode: 'nope' }] })).status, 400);
+  assert.ok((await ann.req('GET', '/api/state')).body.me.apiTokens[0].lastUsedAt > 0);
+
+  // Removing the token cuts the extension off.
+  assert.deepEqual((await ann.req('DELETE', `/api/tokens?id=${made.me.apiTokens[0].id}`)).body.me.apiTokens, []);
+  assert.equal((await ext('GET', '/api/ext/ping')).status, 401);
 });
