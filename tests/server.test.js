@@ -632,7 +632,17 @@ test('http: accounts are isolated; invites, resets, sharing and admin limits', a
   assert.equal((await anon.req('POST', '/api/signup', { token: 'made-up', username: 'bob', password: 'password-bob' })).status, 404);
   assert.equal((await anon.req('POST', '/api/admin/invites')).status, 401);
   const invite = (await ann.req('POST', '/api/admin/invites')).body;
-  assert.equal(invite.pendingInvites, 1);
+  assert.equal(invite.invites.length, 1);
+  assert.deepEqual(Object.keys(invite.invites[0]).sort(), ['createdAt', 'expiresAt', 'id', 'note']);
+  assert.ok(!JSON.stringify(invite.invites).includes(invite.token), 'the link itself is not listed');
+  // A second invite, with a note, can be revoked before anyone uses it.
+  const spare = (await ann.req('POST', '/api/admin/invites', { note: '  for Kira  ' })).body;
+  const spareRow = spare.invites.find((i) => i.note === 'for Kira');
+  assert.equal(spare.invites.length, 2);
+  assert.equal((await ann.req('DELETE', '/api/admin/invites?id=nope')).status, 400);
+  assert.equal((await ann.req('DELETE', `/api/admin/invites?id=${spareRow.id}`)).body.invites.length, 1);
+  assert.equal((await anon.req('POST', '/api/signup', { token: spare.token, username: 'kira', password: 'password-kira' })).status, 404, 'revoked invite no longer works');
+  assert.equal((await anon.req('GET', `/api/link?kind=invite&token=${spare.token}`)).status, 404);
   assert.ok(!JSON.stringify(store.data.invites).includes(invite.token), 'only a hash of the invite is stored');
   assert.deepEqual((await anon.req('GET', `/api/link?kind=invite&token=${invite.token}`)).body, { kind: 'invite', username: null });
   assert.equal((await bob.req('POST', '/api/signup', { token: invite.token, username: 'ANN', password: 'password-bob' })).status, 409, 'username taken, any case');
@@ -658,7 +668,7 @@ test('http: accounts are isolated; invites, resets, sharing and admin limits', a
   assert.deepEqual(Object.keys((await ann.req('GET', '/api/state')).body.shows), ['anilist:5'], "Ann's list is untouched");
 
   // Admin functions are closed to Bob, and show the admin names only.
-  for (const [m, p, b] of [['GET', '/api/admin/users'], ['POST', '/api/admin/invites'], ['POST', '/api/admin/reset', { id: 'u1' }], ['DELETE', '/api/admin/users?id=x']]) {
+  for (const [m, p, b] of [['GET', '/api/admin/users'], ['POST', '/api/admin/invites'], ['DELETE', '/api/admin/invites?id=0123456789abcdef'], ['POST', '/api/admin/reset', { id: 'u1' }], ['DELETE', '/api/admin/users?id=x']]) {
     assert.equal((await bob.req(m, p, b)).status, 403, `${m} ${p}`);
   }
   const roster = (await ann.req('GET', '/api/admin/users')).body;

@@ -19,13 +19,14 @@ const ui = {
   cinema: null, // { list, updatedAt } of anime films in US cinemas
   loading: {},
   link: null, // { kind: 'invite' | 'reset' | 'share', token, ... } from the page address
-  admin: null, // { users, pendingInvites, encrypted }
+  admin: null, // { users, invites, encrypted, mail, movies }
   shared: null, // someone else's shared list
   forgot: false, // showing the forgot-password form
   info: null, // one-off good news shown above the page
   mfa: null, // { options } while the second sign-in step is pending
   offerPasskey: false, // showing the "add a passkey" prompt after sign-in
   codes: null, // recovery codes to show once
+  newInvite: null, // an invite link just created, shown once
   openSeries: new Set(), // series expanded on the My shows tab
 };
 
@@ -1147,6 +1148,8 @@ function viewAdmin() {
           out.querySelector('input').select();
         };
         const fail = (e) => out.replaceChildren(h('p', { class: 'error small' }, e.message));
+        const note = h('input', { type: 'text', id: 'invite-note', maxlength: 60, autocomplete: 'off', placeholder: 'e.g. Kira' });
+        if (ui.newInvite) setTimeout(() => showLink('New invite link', ui.newInvite, 'Works once, for 7 days. Copy it now: it will not be shown again.'));
         return h(
           'div',
           { class: 'card' },
@@ -1216,6 +1219,7 @@ function viewAdmin() {
               ),
             ),
           ),
+          h('label', { class: 'field', for: 'invite-note' }, 'Invite someone (optional note, e.g. who it is for)', note),
           h(
             'div',
             { class: 'actions' },
@@ -1225,16 +1229,61 @@ function viewAdmin() {
                 class: 'btn primary',
                 type: 'button',
                 onclick: () =>
-                  call('POST', '/api/admin/invites').then((r) => {
-                    ui.admin = { users: r.users, pendingInvites: r.pendingInvites, encrypted: r.encrypted };
-                    showLink('Invite link', `${location.origin}/#invite=${r.token}`, 'Works once, for 7 days. Whoever opens it can create one account.');
+                  call('POST', '/api/admin/invites', { note: note.value }).then((r) => {
+                    const { token, ...view } = r;
+                    ui.admin = view;
+                    // Keep the new link on screen through the re-render.
+                    ui.newInvite = `${location.origin}/#invite=${token}`;
+                    render();
                   }, fail),
               },
               'Create an invite link',
             ),
-            a.pendingInvites > 0 && h('span', { class: 'muted small' }, `${a.pendingInvites} unused invite${a.pendingInvites === 1 ? '' : 's'} outstanding`),
           ),
           out,
+          h('h3', { class: 'sub-head' }, `Unused invite links (${a.invites.length})`),
+          a.invites.length
+            ? h(
+                'div',
+                { class: 'list' },
+                a.invites.map((inv) =>
+                  h(
+                    'div',
+                    { class: 'row' },
+                    h(
+                      'div',
+                      { class: 'body' },
+                      h('div', { class: 'title' }, inv.note || 'Invite'),
+                      h('div', { class: 'sub' }, `${inv.createdAt ? `Created ${fmtShortDay.format(inv.createdAt)} · ` : ''}expires ${fmtShortDay.format(inv.expiresAt)}`),
+                    ),
+                    h(
+                      'div',
+                      { class: 'side' },
+                      h(
+                        'button',
+                        {
+                          class: 'btn quiet',
+                          type: 'button',
+                          'aria-label': `Remove invite ${inv.note || ''}`,
+                          onclick: async () => {
+                            if (!confirm('Remove this invite? Its link will stop working.')) return;
+                            try {
+                              ui.admin = await call('DELETE', `/api/admin/invites?id=${inv.id}`);
+                              ui.newInvite = null;
+                              render();
+                            } catch (e) {
+                              fail(e);
+                            }
+                          },
+                        },
+                        'Remove',
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            : h('p', { class: 'muted small' }, 'None. Invites disappear from this list once used or after 7 days.'),
+          h('p', { class: 'muted small' }, 'For safety a link is shown only once, when it is created. If you lose one, remove it and create another.'),
         );
       })(),
     ),
@@ -1663,6 +1712,7 @@ function setTab(id) {
     call('POST', '/api/alerts/read').catch(() => {});
   }
   ui.tab = id;
+  ui.newInvite = null;
   ui.notice = null;
   ui.info = null;
   render();
