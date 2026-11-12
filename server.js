@@ -210,7 +210,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const tick = () => tracker.tick().catch((e) => console.error('Background check failed:', e.message));
   tick();
   setInterval(tick, 60 * 1000);
-  server.listen(port, '0.0.0.0', () => console.log(`Show Tracker listening on port ${port}`));
+  // '::' accepts both IPv6 and IPv4, so health checks against `localhost` work
+  // whichever way it resolves inside a container.
+  server.listen(port, '::', () => console.log(`Show Tracker listening on port ${port}`));
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => {
     server.close(() => process.exit(0));
     server.closeAllConnections();
