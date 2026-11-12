@@ -11,6 +11,7 @@ import { createTracker } from './server/tracker.js';
 import { hashPassword, checkPassword, sessionCookie, clearCookie, hasSession, safeEqual } from './server/auth.js';
 import { sendAlerts, validateChannels } from './server/notify.js';
 import { buildIcs } from './server/ics.js';
+import { validTimeZone } from './server/timing.js';
 import * as liveSources from './server/sources.js';
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), 'app');
@@ -97,6 +98,8 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, n
     lastRefresh: data.lastRefresh,
     lastError: data.lastError,
     feedToken: data.feedToken,
+    watched: data.watched,
+    muted: data.muted,
   });
 
   /** Suggestions, minus anything now tracked or waved away. */
@@ -180,14 +183,40 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, n
 
       case 'PUT /api/settings': {
         const body = await readJson(req);
+        const cur = data.settings;
+        const hour = (v, fallback) => (v === null ? null : Number.isInteger(v) && v >= 0 && v <= 23 ? v : fallback);
         const next = {
-          services: Array.isArray(body.services) ? body.services.filter((s) => Object.hasOwn(SERVICES, s)) : data.settings.services,
-          ntfyUrl: typeof body.ntfyUrl === 'string' ? body.ntfyUrl.trim() : data.settings.ntfyUrl,
-          discordWebhook: typeof body.discordWebhook === 'string' ? body.discordWebhook.trim() : data.settings.discordWebhook,
+          services: Array.isArray(body.services) ? body.services.filter((s) => Object.hasOwn(SERVICES, s)) : cur.services,
+          ntfyUrl: typeof body.ntfyUrl === 'string' ? body.ntfyUrl.trim() : cur.ntfyUrl,
+          discordWebhook: typeof body.discordWebhook === 'string' ? body.discordWebhook.trim() : cur.discordWebhook,
+          alertMode: ['instant', 'digest'].includes(body.alertMode) ? body.alertMode : cur.alertMode,
+          digestHour: hour(body.digestHour, cur.digestHour) ?? cur.digestHour,
+          quietStart: 'quietStart' in body ? hour(body.quietStart, cur.quietStart) : cur.quietStart,
+          quietEnd: 'quietEnd' in body ? hour(body.quietEnd, cur.quietEnd) : cur.quietEnd,
+          remindMinutes: [0, 10, 30, 60].includes(body.remindMinutes) ? body.remindMinutes : cur.remindMinutes,
+          timeZone: validTimeZone(body.timeZone) ? body.timeZone : cur.timeZone,
         };
         const problem = validateChannels(next);
         if (problem) throw new HttpError(400, problem);
         data.settings = next;
+        store.save();
+        return reply(200, publicState());
+      }
+
+      case 'POST /api/watched': {
+        const { ids, watched } = await readJson(req);
+        if (!Array.isArray(ids) || ids.length > 500 || !ids.every((i) => typeof i === 'string' && i.length <= 80)) throw new HttpError(400, 'Bad episode list.');
+        const set = new Set(data.watched);
+        for (const id of ids) watched === false ? set.delete(id) : set.add(id);
+        data.watched = [...set].slice(-5000);
+        store.save();
+        return reply(200, publicState());
+      }
+
+      case 'POST /api/shows/mute': {
+        const { key, muted } = await readJson(req);
+        if (typeof key !== 'string' || !Object.hasOwn(data.shows, key)) throw new HttpError(400, 'Unknown show.');
+        data.muted = muted === false ? data.muted.filter((k) => k !== key) : [...new Set([...data.muted, key])];
         store.save();
         return reply(200, publicState());
       }
