@@ -216,7 +216,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     progress: u.progress,
     muted: u.muted,
     // Which tracked shows are seasons of the same series: show key -> { id, title }.
-    series: u.discover?.series || {},
+    series: tracker.seriesOf(u),
   });
 
   /** Suggestions, minus anything now tracked or waved away. */
@@ -250,6 +250,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       .sort((a, b) => a.expiresAt - b.expiresAt),
   });
   const seasonCache = new Map();
+  const premiereCache = new Map();
   /** Movie features need a TMDB key on the server. */
   const movies = () => Boolean(sources.hasMovies?.());
 
@@ -595,6 +596,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         const hour = (v, fallback) => (v === null ? null : Number.isInteger(v) && v >= 0 && v <= 23 ? v : fallback);
         const next = {
           services: Array.isArray(body.services) ? body.services.filter((s) => Object.hasOwn(SERVICES, s)) : cur.services,
+          region: typeof body.region === 'string' && /^[A-Z]{2}$/.test(body.region) ? body.region : cur.region,
           ntfyUrl: typeof body.ntfyUrl === 'string' ? body.ntfyUrl.trim() : cur.ntfyUrl,
           discordWebhook: typeof body.discordWebhook === 'string' ? body.discordWebhook.trim() : cur.discordWebhook,
           alertMode: ['instant', 'digest'].includes(body.alertMode) ? body.alertMode : cur.alertMode,
@@ -609,9 +611,12 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         };
         const problem = validateChannels(next);
         if (problem) throw new HttpError(400, problem);
+        const moved = next.region !== cur.region;
         u.settings = next;
         u.lastError = null;
         store.save();
+        // A new country needs its own availability lookups: start now rather than at the next minute.
+        if (moved) tracker.fillAvailability(6).catch((e) => console.error('Availability lookup failed:', e.message));
         return reply(200, publicState(u));
       }
 
@@ -706,6 +711,16 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         if (!u.dismissed.includes(key)) u.dismissed = [...u.dismissed, key].slice(-2000);
         store.save();
         return reply(200, publicDiscover(u));
+      }
+
+      case 'GET /api/premieres': {
+        const region = u.settings.region || 'US';
+        let hit = premiereCache.get(region);
+        if (!hit || now() - hit.at > 12 * 60 * 60 * 1000) {
+          hit = { at: now(), list: await sources.fetchPremieres(region, now()) };
+          premiereCache.set(region, hit);
+        }
+        return reply(200, { region, list: hit.list });
       }
 
       case 'GET /api/cinema': {

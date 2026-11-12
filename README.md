@@ -22,7 +22,8 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
   with an alert on the day. *Discover → In cinemas* lists anime films with a US
   cinema date, and you are told when a new one is announced.
 - **Series** – anime seasons are separate entries at the source; seasons of the same
-  show are folded into one entry on *My shows*, and new seasons of anime you track
+  show are folded into one entry on *My shows* and *Watch next* and grouped in
+  search results, and new seasons of anime you track
   are added automatically when announced (switchable in *Settings*).
 - **Alerts** – when an episode of a tracked show airs, the server sends a push
   through [ntfy](https://ntfy.sh) and/or a Discord webhook, and lists it in the
@@ -49,9 +50,11 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
   browser on desktop.
 - **Calendar feed** – a private `.ics` address (under *Settings*) you can subscribe
   to from Google Calendar, Outlook or Apple Calendar.
-- **Streaming services** – each show is tagged with where it streams. Your services
-  (Crunchyroll, HIDIVE and Prime Video by default) are highlighted, and shows that
-  are on none of them are flagged.
+- **Streaming services** – each show is tagged with where it streams. With a TMDB
+  key the tags follow your country (availability supplied by JustWatch); your
+  services (Crunchyroll, HIDIVE and Prime Video by default) are highlighted, and
+  shows on none of them are flagged. *Discover → New on streaming* lists season
+  premieres on streaming services in your country for the next two weeks.
 - **Accounts** – each person has their own private list, alerts and settings.
   Nobody can see anyone else's list; an admin sees usernames only. People join
   through one-time invite links, and can share their list read-only by link if they
@@ -119,7 +122,8 @@ Then open <http://localhost:3000>. Data goes to `./data` unless `DATA_DIR` is se
 
 - Anime air times are the Japanese broadcast time. Simulcasts usually appear on
   Crunchyroll / HIDIVE shortly after, but some are delayed.
-- Streaming tags are not region-specific.
+- Streaming tags follow your country only once a show has been looked up, and only
+  with a TMDB key; otherwise they are not tied to a country.
 - Movie data comes from TMDB and release dates are for the US. This product uses the
   TMDB API but is not endorsed or certified by TMDB.
 - On the public ntfy.sh server, anyone who knows a topic name can read it – use a

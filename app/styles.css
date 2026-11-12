@@ -296,3 +296,5 @@ dialog.ask h3 { font-size: 18px; margin-bottom: 6px; }
 /* ---------- watch next ---------- */
 details > summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
 details[open] > summary { margin-bottom: 10px; }
+.results .row.nested { margin-left: 0; padding-left: 40px; background: var(--panel-2); }
+.results .row.nested .thumb { width: 28px; height: 40px; }

@@ -256,3 +256,50 @@ export async function fetchCinemaAnime(now = Date.now()) {
   const cinemaAt = (m) => m.episodes.find((e) => e.event === 'cinema').airsAt;
   return movies.sort((a, b) => cinemaAt(a) - cinemaAt(b));
 }
+
+// ---------------------------------------------------------------- where it streams
+//
+// Streaming availability by country comes from JustWatch through TMDB. AniList's
+// own streaming links are not tied to a country, so this is what makes the
+// service badges accurate for where the viewer lives.
+
+/**
+ * Subscription services a series is on, per country.
+ * show: { title, altTitle, imdb, anime }. Returns { tmdbId, byRegion: { US: [names] }, links: { US: url } }
+ * (empty when the series cannot be found), for the regions asked for.
+ */
+export async function fetchAvailability(show, regions) {
+  let hit = null;
+  if (show.imdb) hit = (await tmdb(`/find/${encodeURIComponent(show.imdb)}?external_source=imdb_id`)).tv_results?.[0] || null;
+  for (const title of [show.title, show.altTitle]) {
+    if (hit || !title) continue;
+    const found = (await tmdb(`/search/tv?query=${encodeURIComponent(title)}&include_adult=false`)).results || [];
+    // For anime, insist on a Japanese animated series so a live-action namesake is not picked.
+    hit = (show.anime ? found.find((r) => r.origin_country?.includes('JP') && r.genre_ids?.includes(16)) : found[0]) || null;
+  }
+  if (!hit) return { tmdbId: null, byRegion: {}, links: {} };
+  const data = (await tmdb(`/tv/${hit.id}/watch/providers`)).results || {};
+  const byRegion = {};
+  const links = {};
+  for (const region of regions) {
+    byRegion[region] = (data[region]?.flatrate || []).map((p) => p.provider_name);
+    if (data[region]?.link) links[region] = data[region].link;
+  }
+  return { tmdbId: hit.id, byRegion, links };
+}
+
+/** Season premieres on streaming services in one country over the next two weeks. */
+export async function fetchPremieres(region, now = Date.now()) {
+  const SKIP = ['News', 'Talk Show', 'Sports', 'Game Show', 'Panel Show', 'Award Show'];
+  const seen = new Map();
+  for (let d = 0; d < 14; d++) {
+    const date = new Date(now + d * DAY).toISOString().slice(0, 10);
+    const day = await tvmaze(`/schedule/web?date=${date}&country=${encodeURIComponent(region)}`);
+    for (const ep of day) {
+      const show = ep._embedded?.show;
+      if (!show || ep.number !== 1 || !ep.airstamp || SKIP.includes(show.type) || seen.has(show.id)) continue;
+      seen.set(show.id, { ...normalizeTvmaze({ ...show, _embedded: { episodes: [ep] } }, now), premiere: ep.season === 1 ? 'New series' : `Season ${ep.season}` });
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.episodes[0].airsAt - b.episodes[0].airsAt);
+}
