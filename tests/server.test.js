@@ -7,7 +7,7 @@ import { createApp } from '../server.js';
 import { openStore, makeUser } from '../server/store.js';
 import { createTracker } from '../server/tracker.js';
 import { buildIcs } from '../server/ics.js';
-import { computeDiscover } from '../server/discover.js';
+import { computeDiscover, buildSeries } from '../server/discover.js';
 import { localClock, inQuietHours, summarize } from '../server/timing.js';
 import { buildBackup, readBackup, writeSnapshot } from '../server/backup.js';
 import { createMailer, cleanEmail } from '../server/mail.js';
@@ -28,6 +28,7 @@ function fakeShow(id, clock, extra = {}) {
     image: null,
     url: `https://anilist.co/anime/${id}`,
     status: 'Airing',
+    year: 2020 + (id % 5),
     streams: [{ id: 'crunchyroll', name: 'Crunchyroll', url: 'https://crunchyroll.com/x' }],
     episodes: [
       { id: `anilist:${id}:1`, label: 'Episode 1', airsAt: clock.t - DAY },
@@ -130,7 +131,18 @@ test('discover follows sequel chains and ranks recommendations', async () => {
     ['anilist:51', ['One', 'Two']],
     ['anilist:50', ['One']],
   ]);
-  assert.deepEqual(await computeDiscover({ shows: [], sources, now: clock.t }), { sequels: [], recs: [] });
+  assert.deepEqual(await computeDiscover({ shows: [], sources, now: clock.t }), { sequels: [], recs: [], links: [] });
+
+  // Series: 1 and 2 are joined directly; 1 and a tracked 11 are joined through the untracked 10.
+  assert.deepEqual(buildSeries(shows, d.links), {
+    'anilist:1': { id: 'anilist:1', title: 'One' },
+    'anilist:2': { id: 'anilist:1', title: 'One' },
+  });
+  const withS3 = [...shows, fakeShow(11, clock, { title: 'One S3', year: 2027 }), fakeShow(77, clock, { title: 'Unrelated' })];
+  const grouped = buildSeries(withS3, d.links);
+  assert.deepEqual(Object.keys(grouped).sort(), ['anilist:1', 'anilist:11', 'anilist:2']);
+  assert.equal(grouped['anilist:11'].id, grouped['anilist:1'].id);
+  assert.deepEqual(buildSeries([shows[0]], d.links), {}, 'a single tracked season is not a series');
 });
 
 test('timing helpers', () => {
@@ -229,22 +241,56 @@ test('tracker records refresh failures and backs off', async () => {
   assert.equal(store.data.lastError, null);
 });
 
-test('tracker alerts for a newly announced season, but not on the first scan', async () => {
-  const { sent, sources, user, tracker } = rig();
-  sources.related.set(1, { sequels: [media(10, 'One S2', 'NOT_YET_RELEASED')], recs: [{ rating: 5, media: media(50, 'Rec A') }] });
-  await tracker.addShow(user, 'anilist', 1);
-  await tracker.refreshDiscover(user);
-  assert.equal(sent.length, 0, 'seasons that already existed are not announced');
-  assert.deepEqual(user.discover.sequels.map((s) => s.key), ['anilist:10']);
+test('new seasons: alert once, never on the first scan; followed series pick them up automatically', async () => {
+  // With automatic tracking switched off: listed and announced, not added.
+  {
+    const { sent, sources, user, tracker } = rig();
+    user.settings.autoTrackSeasons = false;
+    sources.related.set(1, { sequels: [media(10, 'One S2', 'NOT_YET_RELEASED')], recs: [{ rating: 5, media: media(50, 'Rec A') }] });
+    await tracker.addShow(user, 'anilist', 1);
+    await tracker.refreshDiscover(user);
+    assert.equal(sent.length, 0, 'seasons that already existed are not announced');
+    assert.deepEqual(user.discover.sequels.map((s) => s.key), ['anilist:10']);
+    assert.deepEqual(Object.keys(user.shows), ['anilist:1']);
 
-  sources.related.set(10, { sequels: [media(11, 'One S3', 'NOT_YET_RELEASED')], recs: [] });
-  await tracker.refreshDiscover(user);
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0][0].title, 'One S3');
-  assert.match(sent[0][0].body, /^New season of Show 1 announced — expected apr 2027$/);
-  assert.equal(user.alerts[0].ep.label, 'New season of Show 1');
-  await tracker.refreshDiscover(user);
-  assert.equal(sent.length, 1, 'announced once');
+    sources.related.set(10, { sequels: [media(11, 'One S3', 'NOT_YET_RELEASED')], recs: [] });
+    await tracker.refreshDiscover(user);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0][0].title, 'One S3');
+    assert.equal(sent[0][0].body, 'New season of Show 1 announced — expected apr 2027');
+    assert.equal(user.alerts[0].ep.label, 'New season of Show 1');
+    await tracker.refreshDiscover(user);
+    assert.equal(sent.length, 1, 'announced once');
+    assert.equal(user.discover.links, undefined, 'working data is not stored');
+  }
+
+  // With it on (the default): upcoming seasons join the list and form one series.
+  {
+    const { sent, sources, user, tracker } = rig();
+    sources.related.set(1, { sequels: [media(10, 'One S2', 'FINISHED')], recs: [] });
+    sources.related.set(10, { sequels: [media(11, 'One S3', 'NOT_YET_RELEASED')], recs: [] });
+    await tracker.addShow(user, 'anilist', 1);
+    await tracker.refreshDiscover(user);
+    assert.deepEqual(Object.keys(user.shows).sort(), ['anilist:1', 'anilist:11'], 'the upcoming season is added, the finished one is not');
+    assert.equal(sent.length, 0, 'silently on the first scan');
+    assert.deepEqual(user.discover.series, { 'anilist:1': { id: 'anilist:1', title: 'Show 1' }, 'anilist:11': { id: 'anilist:1', title: 'Show 1' } });
+
+    sources.related.set(11, { sequels: [media(12, 'One S4', 'RELEASING')], recs: [] });
+    await tracker.refreshDiscover(user);
+    assert.ok(user.shows['anilist:12']);
+    assert.equal(sent.flat().at(-1).body, 'New season of Show 1 is airing. Added to your list.');
+    assert.equal(user.discover.series['anilist:12'].id, 'anilist:1');
+
+    // A season the user removes stays removed, until they add it back by hand.
+    tracker.removeShow(user, 'anilist:12');
+    await tracker.refreshDiscover(user);
+    await tracker.refreshDiscover(user);
+    assert.equal(user.shows['anilist:12'], undefined);
+    assert.equal(user.discover.series['anilist:12'], undefined);
+    await tracker.addShow(user, 'anilist', 12);
+    assert.ok(user.shows['anilist:12']);
+    assert.ok(!user.dismissed.includes('anilist:12'));
+  }
 });
 
 test('quiet hours hold alerts, the digest sends once a day, muted shows stay silent', async () => {
@@ -473,6 +519,7 @@ test('http: setup, sign-in and the single-user features', async (t) => {
 
   assert.equal((await req('GET', '/api/search?source=anime&q=frieren')).body[0].title, 'frieren');
   assert.equal((await req('GET', '/api/season?which=next')).body.list.length, 1);
+  assert.equal((await req('PUT', '/api/settings', { autoTrackSeasons: false })).body.settings.autoTrackSeasons, false);
   sources.related.set(5, { sequels: [media(60, 'Five S2', 'RELEASING')], recs: [{ rating: 5, media: media(61, 'Rec') }] });
   await tracker.refreshDiscover(Object.values(store.data.users)[0], { silent: true });
   let disc = await req('GET', '/api/discover');
