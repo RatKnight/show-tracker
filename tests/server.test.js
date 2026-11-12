@@ -530,15 +530,28 @@ async function serve(t, opts = {}) {
   const client = (ip = '198.51.100.1') => {
     const c = {
       cookie: '',
+      admin: '',
+      /** Confirm it is the admin, as the Admin tab does on first opening (password form; accounts with a passkey use that instead). */
+      async unlockAdmin(password) {
+        return c.req('POST', '/api/admin/unlock', { password });
+      },
       async req(method, path, body, headers = {}) {
         const res = await fetch(base + path, {
           method,
           // Like a browser on the site's own pages: every request says where it comes from.
-          headers: { 'X-Forwarded-For': ip, Origin: base, ...(body ? { 'Content-Type': 'application/json' } : {}), ...(c.cookie ? { Cookie: c.cookie } : {}), ...headers },
+          headers: { 'X-Forwarded-For': ip, Origin: base, ...(body ? { 'Content-Type': 'application/json' } : {}), ...(c.cookie || c.admin ? { Cookie: [c.cookie, c.admin].filter(Boolean).join('; ') } : {}), ...headers },
           body: body ? JSON.stringify(body) : undefined,
         });
-        const set = res.headers.get('set-cookie');
-        if (set) c.cookie = set.split(';')[0];
+        // The sign-in (or pending) cookie is kept as before; the admin-unlock cookie rides alongside.
+        let main = false;
+        for (const line of res.headers.getSetCookie()) {
+          const pair = line.split(';')[0];
+          if (pair.startsWith('st_admin=')) c.admin = pair === 'st_admin=' ? '' : pair;
+          else if (!main) {
+            c.cookie = pair;
+            main = true;
+          }
+        }
         const text = await res.text();
         return { status: res.status, body: res.headers.get('content-type')?.includes('json') ? JSON.parse(text) : text };
       },
@@ -667,6 +680,19 @@ test('http: accounts are isolated; invites, resets, sharing and admin limits', a
   await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
   await ann.req('POST', '/api/shows', { source: 'anilist', id: 5 });
   await ann.req('PUT', '/api/settings', { ntfyUrl: 'https://ntfy.sh/anns-private-topic' });
+
+  // The admin pages stay shut until the admin confirms it is them, once per session.
+  const locked = await ann.req('POST', '/api/admin/invites');
+  assert.deepEqual([locked.status, locked.body.locked], [403, true]);
+  assert.deepEqual((await ann.req('GET', '/api/admin/unlock')).body, { unlocked: false, method: 'password' });
+  assert.equal((await ann.unlockAdmin('wrong')).status, 403);
+  assert.equal((await ann.unlockAdmin('password-ann')).status, 200);
+  assert.deepEqual((await ann.req('GET', '/api/admin/unlock')).body, { unlocked: true });
+  // The confirmation belongs to that sign-in session: it does not carry to another one.
+  const elsewhere = client('198.51.100.7');
+  await elsewhere.req('POST', '/api/login', { username: 'ann', password: 'password-ann' });
+  elsewhere.admin = ann.admin;
+  assert.equal((await elsewhere.req('GET', '/api/admin/users')).status, 403);
 
   // Sign-up needs an invite; invites are single use.
   assert.equal((await anon.req('POST', '/api/signup', { token: 'made-up', username: 'bob', password: 'password-bob' })).status, 404);
@@ -849,7 +875,10 @@ test('http: e-mail confirmation and forgot-password', async (t) => {
   // Removing the address switches recovery by mail off for the account.
   assert.equal((await fresh.req('PUT', '/api/account/email', { email: '', password: 'brand-new-password' })).body.me.email, '');
   // The admin roster never includes addresses.
-  assert.ok(!JSON.stringify((await fresh.req('GET', '/api/admin/users')).body).includes('example.com'));
+  await fresh.unlockAdmin('brand-new-password');
+  const rosterText = JSON.stringify((await fresh.req('GET', '/api/admin/users')).body);
+  // No address of any kind in what the admin sees: checked by the "@" every address has.
+  assert.ok(rosterText.includes('"ann"') && !rosterText.includes('@'));
 });
 
 test('http: e-mail features are closed when mail is not configured', async (t) => {
@@ -1003,6 +1032,25 @@ test('http: passkeys as a second sign-in step, recovery codes, and no bypass by 
   assert.equal((await lost.req('POST', '/api/login/passkey', { response: key.get(back.options) })).status, 200);
 
   // Admin can clear another person's protection, not snoop on it; removing the last passkey turns it off.
+  // Opening the admin pages takes the passkey for an account that has one: the password will not do.
+  const gate = (await lost.req('GET', '/api/admin/unlock')).body;
+  assert.deepEqual([gate.unlocked, gate.method, gate.options.allowCredentials.length], [false, 'passkey', 2]);
+  assert.equal((await lost.req('POST', '/api/admin/unlock', { password: 'thief-password' })).status, 403);
+  assert.equal((await lost.req('POST', '/api/admin/unlock', { response: stranger.get(gate.options) })).status, 403);
+  assert.equal((await lost.req('POST', '/api/admin/invites')).status, 403);
+  const gate2 = (await lost.req('GET', '/api/admin/unlock')).body;
+  assert.equal((await lost.req('POST', '/api/admin/unlock', { response: key.get(gate2.options) })).status, 200);
+  // A recovery code works too (for a device without the passkey), once.
+  const spareSession = client('198.51.100.30');
+  const sp = (await spareSession.req('POST', '/api/login', { username: 'ann', password: 'thief-password' })).body;
+  await spareSession.req('POST', '/api/login/passkey', { response: phone.get(sp.options) });
+  const freshCodes = (await spareSession.req('POST', '/api/recovery-codes')).body.recoveryCodes;
+  assert.equal((await spareSession.req('POST', '/api/admin/unlock', { code: freshCodes[0] })).status, 200);
+  assert.equal((await spareSession.req('GET', '/api/admin/users')).status, 200);
+  // Logging out drops the confirmation with the session.
+  await spareSession.req('POST', '/api/logout');
+  assert.equal(spareSession.admin, '');
+
   const bobInvite = (await lost.req('POST', '/api/admin/invites')).body.token;
   const bob = client('198.51.100.10');
   await bob.req('POST', '/api/signup', { token: bobInvite, username: 'bob', password: 'password-bob' });
@@ -1279,6 +1327,7 @@ test('http: account owners are e-mailed when an admin acts on their account', as
   const ann = client('198.51.100.1');
   const bob = client('198.51.100.2');
   await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  await ann.unlockAdmin('password-ann');
   const invite = (await ann.req('POST', '/api/admin/invites', { note: 'bob' })).body.token;
   await bob.req('POST', '/api/signup', { token: invite, username: 'bob', password: 'password-bob' });
   const bobUser = Object.values(store.data.users).find((x) => x.username === 'bob');
@@ -1470,8 +1519,9 @@ test('http: failed sign-ins cannot lock everyone out; one account is capped acro
   const { setupCode, client } = await serve(t);
   const ann = client('198.51.100.1');
   await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  await ann.unlockAdmin('password-ann');
   const invite = (await ann.req('POST', '/api/admin/invites')).body.token;
-  await client('198.51.100.2').req('POST', '/api/signup', { token: invite, username: 'bob', password: 'password-bob' });
+  assert.equal((await client('198.51.100.2').req('POST', '/api/signup', { token: invite, username: 'bob', password: 'password-bob' })).status, 200);
 
   // 280 failures from 40 addresses against made-up names: nobody real is affected.
   for (let ip = 0; ip < 40; ip++) for (let n = 0; n < 7; n++) await client(`203.0.113.${ip}`).req('POST', '/api/login', { username: `ghost${ip}-${n}`, password: 'wrong' });

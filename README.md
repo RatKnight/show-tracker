@@ -108,6 +108,9 @@ yet. Setup code for the first visit: …`), so nobody else can claim a fresh ins
   reset (by e-mail or admin link) does not skip the passkey; an admin can remove
   someone's passkeys if they lose both their device and their codes. Passkeys are
   tied to the site's address, so set `PUBLIC_URL`.
+- The admin pages need a further confirmation once per sign-in session: the
+  admin's passkey (or a recovery code), or their password if they have no passkey
+  yet. A signed-in browser alone cannot manage other people's accounts.
 - Forgotten passwords are reset with a one-time link: created by an admin
   (*Admin* tab), or, when e-mail is configured, sent to the address a
   person has added and confirmed. Addresses are optional, used for nothing else,
