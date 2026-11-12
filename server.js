@@ -268,11 +268,11 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       }
       if (route === 'GET /api/ext/ping') return reply(200, { ok: true, username: owner.username });
       if (route === 'POST /api/ext/watched') {
-        const { items } = await readJson(req, 512 * 1024);
+        const { items, provider } = await readJson(req, 512 * 1024);
         const ok = (i) =>
           i && typeof i.series === 'string' && i.series.length <= 200 && Number.isInteger(i.episode) && i.episode >= 1 && i.episode <= 5000 && (i.season == null || (Number.isInteger(i.season) && i.season >= 1 && i.season <= 50));
         if (!Array.isArray(items) || items.length > 2000 || !items.every(ok)) throw new HttpError(400, 'Bad watch list.');
-        const result = tracker.reportWatched(owner, items.map((i) => ({ series: i.series, season: i.season ?? null, episode: i.episode })));
+        const result = tracker.reportWatched(owner, items.map((i) => ({ series: i.series, season: i.season ?? null, episode: i.episode })), provider === 'hidive' ? 'hidive' : 'crunchyroll');
         // Some shows still need their seasons looked up: start now instead of at the next minute.
         if (result.pending) tracker.fillFranchises(6).catch((e) => console.error('Franchise lookup failed:', e.message));
         if (result.suggested) tracker.resolveSeen(owner, 4).catch((e) => console.error('Lookup failed:', e.message));

@@ -1065,6 +1065,12 @@ test('matchEpisode translates a streaming site\'s numbering to tracked episodes'
   // Only season 2 tracked, and the site says "S2": still placed.
   assert.deepEqual(at({ series: 'A Couple of Cuckoos', season: 2, episode: 3 }, [cuckoos[1]]), [11, 3]);
 
+  // A site that names the season but keeps counting: "Season 2, E25" of a 20 + 12 episode show.
+  const eminence = [show(30, 'The Eminence in Shadow', { root: 'The Eminence in Shadow', offset: 0, index: 1, count: 20 }), show(31, 'The Eminence in Shadow Season 2', { root: 'The Eminence in Shadow', offset: 20, index: 2, count: 12 })];
+  assert.deepEqual(at({ series: 'The Eminence in Shadow', season: 2, episode: 25 }, eminence), [31, 5]);
+  assert.deepEqual(at({ series: 'The Eminence in Shadow', season: 2, episode: 5 }, eminence), [31, 5]);
+  assert.deepEqual(at({ series: 'The Eminence In Shadow', season: 1, episode: 20 }, eminence), [30, 20]);
+  assert.equal(at({ series: 'The Eminence in Shadow', season: 2, episode: 40 }, eminence), null);
   // Season 1's E18 must not land on a tracked 12-episode season 2.
   assert.equal(at({ series: 'A Couple of Cuckoos', season: null, episode: 18 }, [cuckoos[1]]), null);
   // The site splits seasons differently (its "S2" is our third entry): placed when only one fits.

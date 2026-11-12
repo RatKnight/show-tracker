@@ -70,7 +70,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
    * Mark episodes reported by the browser extension as watched.
    * items: [{ series, season, episode }]. Returns counts and what could not be placed.
    */
-  function reportWatched(u, items) {
+  function reportWatched(u, items, provider = 'crunchyroll') {
     const mine = showsOf(u).map((s) => ({ ...s, franchise: data.franchise[s.key] }));
     const watched = new Set(u.watched);
     const unmatched = new Map();
@@ -96,7 +96,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     // Series that are not on the list at all become suggestions in Discover.
     // (Not while season lookups are outstanding: a later season of a tracked show
     // would look like a different, untracked series.)
-    const suggested = franchisePending(u) ? 0 : noteSeen(u, [...unmatched.keys()], 'crunchyroll', 'history');
+    const suggested = franchisePending(u) ? 0 : noteSeen(u, [...unmatched.keys()], provider, 'history');
     return { received: items.length, matched, added, unmatched: [...unmatched].map(([series, count]) => ({ series, count })), pending: franchisePending(u), suggested };
   }
 

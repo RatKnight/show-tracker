@@ -1,6 +1,6 @@
 # Show Tracker Sync (browser extension)
 
-Marks episodes you finish on Crunchyroll as watched in your Show Tracker.
+Marks episodes you finish on Crunchyroll and HIDIVE as watched in your Show Tracker.
 
 It reads your Crunchyroll **history page** while you have it open, and sends the
 show name and episode number of finished episodes to your Show Tracker. It does
@@ -28,6 +28,17 @@ Two more things happen on those visits:
   on your watchlist, which are offered in the same place. Nothing is added to
   your list without you pressing *Track*.
 
+## HIDIVE
+
+HIDIVE's history page does not say which show an episode belongs to; only a
+show's own page does. So:
+
+- Open a **show's page** on HIDIVE (pick the season you want). The extension
+  syncs the finished episodes of that season straight away, and remembers which
+  video is which episode.
+- Your **history page** then syncs entries from every show whose page you have
+  opened at least once. For the rest, a note tells you how many are waiting.
+
 ## Install in Firefox
 
 **For testing** (lasts until Firefox restarts): open `about:debugging` → *This
@@ -47,9 +58,9 @@ extension, and check under *Permissions* that access to crunchyroll.com is on.
   the tracker numbers each season from 1. The tracker translates between them
   using each show's season order, which it looks up the first time; the extension
   waits and retries by itself while that happens.
-- An episode counts as finished when Crunchyroll shows it as watched, or with 3
+- An episode counts as finished when the site shows it as watched, or with about 3
   minutes or less remaining.
 - The extension's popup lists what could not be matched.
 
-Crunchyroll can change its pages at any time, which may stop this working until
+Crunchyroll and HIDIVE can change their pages at any time, which may stop this working until
 `parse.js` is updated.
