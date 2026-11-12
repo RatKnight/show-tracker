@@ -1,4 +1,6 @@
 // Alert delivery: ntfy (phone/desktop push) and a Discord webhook.
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 
 const DISCORD_RE = /^https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/;
 
@@ -55,6 +57,29 @@ export function discordPayloads(messages) {
   return out;
 }
 
+/** Loopback, private-network, link-local and similar addresses. */
+export function isPrivateAddress(ip) {
+  if (isIP(ip) === 4) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
+  }
+  const v6 = ip.toLowerCase();
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v6);
+  if (mapped) return isPrivateAddress(mapped[1]);
+  return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6);
+}
+
+/**
+ * The ntfy address is chosen by each user, so it must not be usable to make
+ * this server call machines on its own network.
+ */
+async function assertPublicHost(url) {
+  const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
+  const addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true }).catch(() => []);
+  if (!addresses.length) throw new Error('address not found');
+  if (addresses.some((a) => isPrivateAddress(a.address))) throw new Error('that address is on a private network and is not allowed');
+}
+
 async function post(url, body, what) {
   const res = await fetch(url, {
     method: 'POST',
@@ -77,6 +102,7 @@ export async function sendAlerts(settings, messages) {
   if (settings.ntfyUrl) {
     try {
       const { server } = parseNtfy(settings.ntfyUrl);
+      await assertPublicHost(server);
       for (const p of ntfyPayloads(settings.ntfyUrl, messages)) await post(server, p, 'ntfy');
     } catch (e) {
       errors.push(`ntfy: ${e.message}`);

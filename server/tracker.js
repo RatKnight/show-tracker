@@ -10,6 +10,7 @@ import { buildBackup, writeSnapshot } from './backup.js';
 import { matchEpisode, normTitle, sameSeries } from './extmatch.js';
 
 const MAX_ALERTS = 100;
+const MAX_TRACKED = 1000;
 export const REFRESH_EVERY = 30 * 60 * 1000;
 export const DISCOVER_EVERY = 12 * 60 * 60 * 1000;
 
@@ -56,7 +57,8 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       } catch (e) {
         // Remember the attempt so one bad entry cannot block the queue for long.
         data.franchise[s.key] = { ...(data.franchise[s.key] || { root: s.title, offset: 0, index: 1, count: null }), at: now() - MONTH + 60 * 60 * 1000 };
-        console.error(`Franchise lookup failed for ${s.title}:`, e.message);
+        // (No title in the log: what people watch stays out of unencrypted logs.)
+        console.error(`Franchise lookup failed for ${s.key}:`, e.message);
       }
     }
     if (due.length) store.save();
@@ -139,7 +141,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
         entry.show = found.find((s) => [s.title, s.altTitle].some((t) => sameSeries(normTitle(t), key))) || null;
       } catch (e) {
         entry.tried = false; // try again later
-        console.error(`Lookup failed for ${entry.title}:`, e.message);
+        console.error('Lookup of a streaming-site title failed:', e.message);
         break;
       }
     }
@@ -369,7 +371,9 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
    */
   async function addMany(u, wanted, { discover = true } = {}) {
     const keyOf = (w) => `${w.source}:${w.id}`;
-    const missing = wanted.filter((w) => !u.shows[keyOf(w)]);
+    // A ceiling per person keeps one account from swamping the schedule sources for everyone.
+    const room = Math.max(0, MAX_TRACKED - Object.keys(u.shows).length);
+    const missing = wanted.filter((w) => !u.shows[keyOf(w)]).slice(0, room);
     const toFetch = missing.filter((w) => !data.catalog[keyOf(w)]);
     const animeIds = toFetch.filter((w) => w.source === 'anilist').map((w) => w.id);
     const fetched = animeIds.length ? await sources.fetchAnime(animeIds, now()) : [];

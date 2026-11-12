@@ -964,14 +964,17 @@ function viewProfile() {
             (() => {
               const mailOut = h('p', { class: 'muted small', role: 'status' });
               const email = h('input', { type: 'email', id: 'account-email', value: state.me.pendingEmail || state.me.email, autocomplete: 'email', placeholder: 'you@example.com' });
-              const save = (value) =>
-                call('PUT', '/api/account/email', { email: value }).then(
+              const save = async (value) => {
+                const password = await askPassword(value ? 'Enter your password to change the recovery e-mail.' : 'Enter your password to remove the recovery e-mail.');
+                if (password === null) return;
+                return call('PUT', '/api/account/email', { email: value, password }).then(
                   () => {
                     ui.notice = null;
                     render();
                   },
                   (e) => (mailOut.textContent = e.message),
                 );
+              };
               return [
                 h('label', { class: 'field', for: 'account-email' }, 'E-mail for password recovery (optional)', email),
                 h(
@@ -1031,9 +1034,10 @@ function viewProfile() {
                       {
                         class: 'btn quiet',
                         type: 'button',
-                        onclick: () => {
+                        onclick: async () => {
                           const last = keys.length === 1;
-                          if (confirm(last ? `Remove “${k.name}”? It is your only passkey, so your account will be protected by its password alone.` : `Remove the passkey “${k.name}”?`)) act('DELETE', `/api/passkeys?id=${encodeURIComponent(k.id)}`);
+                          const password = await askPassword(last ? `Enter your password to remove “${k.name}”. It is your only passkey, so your account will be protected by its password alone.` : `Enter your password to remove the passkey “${k.name}”.`);
+                          if (password !== null) act('POST', '/api/passkeys/remove', { id: k.id, password });
                         },
                       },
                       'Remove',
@@ -1398,6 +1402,36 @@ function viewAdmin() {
   ];
 }
 
+
+/**
+ * Ask for the account password before a change that weakens the account.
+ * Resolves to the password, or null if cancelled.
+ */
+function askPassword(reason) {
+  return new Promise((resolve) => {
+    const input = h('input', { type: 'password', id: 'confirm-password', autocomplete: 'current-password', required: true });
+    const dialog = h(
+      'dialog',
+      { class: 'ask' },
+      h(
+        'form',
+        { method: 'dialog' },
+        h('h3', {}, 'Confirm it’s you'),
+        h('p', { class: 'muted' }, reason),
+        h('label', { class: 'field', for: 'confirm-password' }, 'Password', input),
+        h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'submit', value: 'ok' }, 'Confirm'), h('button', { class: 'btn', type: 'button', onclick: () => dialog.close('cancel') }, 'Cancel')),
+      ),
+    );
+    dialog.addEventListener('close', () => {
+      const value = dialog.returnValue === 'ok' && input.value ? input.value : null;
+      dialog.remove();
+      resolve(value);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
+  });
+}
 
 // ---------------------------------------------------------------- passkeys
 
