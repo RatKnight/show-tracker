@@ -521,7 +521,8 @@ async function serve(t, opts = {}) {
   const dir = tmp();
   const sent = [];
   const sources = fakeSources(clock);
-  const app = createApp({ dataDir: dir, sources, send: async (_s, m) => (sent.push(...m), []), sendFile: async () => {}, ...opts });
+  // As deployed: behind a reverse proxy that reports the visitor's address.
+  const app = createApp({ dataDir: dir, sources, send: async (_s, m) => (sent.push(...m), []), sendFile: async () => {}, trustProxy: true, ...opts });
   await new Promise((r) => app.server.listen(0, '127.0.0.1', r));
   t.after(() => app.server.close());
   const base = `http://127.0.0.1:${app.server.address().port}`;
@@ -532,7 +533,8 @@ async function serve(t, opts = {}) {
       async req(method, path, body, headers = {}) {
         const res = await fetch(base + path, {
           method,
-          headers: { 'X-Forwarded-For': ip, ...(body ? { 'Content-Type': 'application/json' } : {}), ...(c.cookie ? { Cookie: c.cookie } : {}), ...headers },
+          // Like a browser on the site's own pages: every request says where it comes from.
+          headers: { 'X-Forwarded-For': ip, Origin: base, ...(body ? { 'Content-Type': 'application/json' } : {}), ...(c.cookie ? { Cookie: c.cookie } : {}), ...headers },
           body: body ? JSON.stringify(body) : undefined,
         });
         const set = res.headers.get('set-cookie');
@@ -1435,4 +1437,48 @@ test('http: audio setting; a watched mark covers both the subtitled and the dubb
   assert.ok(eps.some((e) => e.id === 'anilist:5:dub:1' && e.dub && e.watchId === 'anilist:5:1'));
   sources.dubbed = false;
   assert.equal((await ann.req('GET', '/api/state')).body.dubs, false);
+});
+
+// ---------------------------------------------------------------- audit follow-ups
+
+test('http: writes must state a same-site origin; proxy headers are believed only when configured', async (t) => {
+  const { setupCode, base, client } = await serve(t);
+  const ann = client('198.51.100.1');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  const send = (headers) => fetch(base + '/api/refresh', { method: 'POST', headers: { Cookie: ann.cookie, ...headers } }).then((r) => r.status);
+  assert.equal(await send({}), 403, 'neither Origin nor Sec-Fetch-Site: refused');
+  assert.equal(await send({ 'Sec-Fetch-Site': 'cross-site' }), 403);
+  assert.equal(await send({ 'Sec-Fetch-Site': 'same-site' }), 403, 'a sibling subdomain is not this site');
+  assert.equal(await send({ Origin: 'https://evil.example' }), 403);
+  assert.equal(await send({ 'Sec-Fetch-Site': 'same-origin' }), 200);
+  assert.equal(await send({ Origin: base }), 200);
+  assert.equal((await fetch(base + '/api/state', { headers: { Cookie: ann.cookie } })).status, 200, 'reads are unaffected');
+
+  // Without TRUST_PROXY the forwarded headers are ignored: no Secure cookie on a
+  // forged "https", and a forged visitor address does not dodge the attempt limit.
+  const direct = await serve(t, { trustProxy: false });
+  const post = (path, body, headers = {}) => fetch(direct.base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: direct.base, ...headers }, body: JSON.stringify(body) });
+  const made = await post('/api/setup', { username: 'ann', password: 'password-ann', code: direct.setupCode }, { 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'evil.example' });
+  assert.equal(made.status, 200, 'the forged host did not change which origin is accepted');
+  assert.ok(!made.headers.get('set-cookie').includes('Secure'));
+  assert.equal((await fetch(direct.base + '/', { headers: { 'X-Forwarded-Proto': 'https' } })).headers.get('strict-transport-security'), null);
+  for (let i = 0; i < 8; i++) await post('/api/login', { username: `nobody${i}`, password: 'wrong' }, { 'X-Forwarded-For': `203.0.113.${i}` });
+  assert.equal((await post('/api/login', { username: 'ann', password: 'password-ann' }, { 'X-Forwarded-For': '203.0.113.99' })).status, 429, 'all counted as one visitor');
+});
+
+test('http: failed sign-ins cannot lock everyone out; one account is capped across addresses', async (t) => {
+  const { setupCode, client } = await serve(t);
+  const ann = client('198.51.100.1');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  const invite = (await ann.req('POST', '/api/admin/invites')).body.token;
+  await client('198.51.100.2').req('POST', '/api/signup', { token: invite, username: 'bob', password: 'password-bob' });
+
+  // 280 failures from 40 addresses against made-up names: nobody real is affected.
+  for (let ip = 0; ip < 40; ip++) for (let n = 0; n < 7; n++) await client(`203.0.113.${ip}`).req('POST', '/api/login', { username: `ghost${ip}-${n}`, password: 'wrong' });
+  assert.equal((await client('198.51.100.3').req('POST', '/api/login', { username: 'ann', password: 'password-ann' })).status, 200, 'no site-wide lockout');
+
+  // 30 failures on Bob from many addresses lock password guessing on Bob only.
+  for (let i = 0; i < 30; i++) assert.equal((await client(`192.0.2.${i}`).req('POST', '/api/login', { username: 'BOB', password: 'wrong' })).status, 401);
+  assert.equal((await client('192.0.2.200').req('POST', '/api/login', { username: 'bob', password: 'password-bob' })).status, 429);
+  assert.equal((await client('192.0.2.201').req('POST', '/api/login', { username: 'ann', password: 'password-ann' })).status, 200);
 });

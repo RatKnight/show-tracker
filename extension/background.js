@@ -2,9 +2,20 @@
 // Crunchyroll page and reports them with your personal access token.
 const api = globalThis.browser ?? globalThis.chrome;
 
+/** The access token is only ever sent over HTTPS (or to this computer, for local testing). */
+function safeSite(site) {
+  try {
+    const u = new URL(site);
+    return u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
 async function report(items, provider = 'crunchyroll') {
   const { site, token } = await api.storage.local.get(['site', 'token']);
   if (!site || !token) return { error: 'not-configured' };
+  if (!safeSite(site)) return { error: 'your Show Tracker address must start with https://.' };
   let res;
   try {
     res = await fetch(`${site}/api/ext/watched`, {
@@ -33,6 +44,7 @@ async function report(items, provider = 'crunchyroll') {
 async function reportSeen(series) {
   const { site, token } = await api.storage.local.get(['site', 'token']);
   if (!site || !token) return { error: 'not-configured' };
+  if (!safeSite(site)) return { error: 'your Show Tracker address must start with https://.' };
   try {
     const res = await fetch(`${site}/api/ext/seen`, {
       method: 'POST',
@@ -46,7 +58,9 @@ async function reportSeen(series) {
   }
 }
 
-api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only this extension's own scripts may ask for anything to be sent.
+  if (sender.id !== api.runtime.id) return false;
   if (message?.type === 'seen' && Array.isArray(message.series)) {
     reportSeen(message.series).then(sendResponse, (e) => sendResponse({ error: e.message }));
     return true;

@@ -50,7 +50,7 @@ const SECURITY_HEADERS = {
 
 const securityHeaders = (req) => ({
   ...SECURITY_HEADERS,
-  ...(req.headers['x-forwarded-proto'] === 'https' ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}),
+  ...(req.viaHttps ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}),
 });
 
 class HttpError extends Error {
@@ -78,7 +78,7 @@ async function readJson(req, limit = 64 * 1024) {
   throw new HttpError(400, 'Invalid JSON.');
 }
 
-export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, mailer = createMailer(), publicUrl = '', now = Date.now } = {}) {
+export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, mailer = createMailer(), publicUrl = '', trustProxy = false, now = Date.now } = {}) {
   const store = openStore(dataDir, { dataKey });
   const { data } = store;
   const tracker = createTracker({ store, sources, send, sendFile, mailer, now });
@@ -96,21 +96,43 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     else failures.delete(key);
     return list;
   };
-  const clientOf = (req) => {
-    // Behind a reverse proxy the last X-Forwarded-For entry is the one it added.
-    const fwd = String(req.headers['x-forwarded-for'] || '').split(',').pop().trim();
-    return fwd || req.socket.remoteAddress || 'unknown';
+  /**
+   * What the reverse proxy says about a request: the visitor's address, the
+   * public host name and whether it arrived over HTTPS. These headers can be
+   * forged by anyone who reaches the app directly, so they are only believed
+   * when the operator has said a proxy is in front (TRUST_PROXY=1).
+   */
+  function describe(req) {
+    const h = req.headers;
+    // The last X-Forwarded-For entry is the one the proxy itself added.
+    const forwardedFor = trustProxy ? String(h['x-forwarded-for'] || '').split(',').pop().trim() : '';
+    req.clientIp = forwardedFor || req.socket.remoteAddress || 'unknown';
+    req.publicHost = String((trustProxy && h['x-forwarded-host']) || h.host || 'localhost');
+    req.viaHttps = trustProxy && h['x-forwarded-proto'] === 'https';
+  }
+  const clientOf = (req) => req.clientIp;
+
+  /**
+   * Throws when this client has guessed too often. `also` names further
+   * counters to respect, such as the account a password is being tried on.
+   * There is deliberately no site-wide counter: it would let anyone lock
+   * everybody out by failing on purpose.
+   */
+  const LIMITS = { ip: 8, account: 30, setup: 100 };
+  const guardAttempts = (req, also = []) => {
+    const over = [`ip:${clientOf(req)}`, ...also].some((key) => recent(key).length >= LIMITS[key.split(':')[0]]);
+    if (over) throw new HttpError(429, 'Too many failed attempts. Try again in 15 minutes.');
   };
-  /** Throws when this client (or everyone together) has guessed too often. */
-  const guardAttempts = (req) => {
-    if (recent(`ip:${clientOf(req)}`).length >= 8 || recent('all').length >= 200) {
-      throw new HttpError(429, 'Too many failed attempts. Try again in 15 minutes.');
+  const noteFailure = (req, also = []) => {
+    for (const key of [`ip:${clientOf(req)}`, ...also]) {
+      const list = [...recent(key), now()];
+      failures.delete(key); // re-inserted below, so the map stays ordered by last failure
+      failures.set(key, list);
     }
+    // Bounded memory: forget the entries that have been quiet longest, never everything at once.
+    while (failures.size > 5000) failures.delete(failures.keys().next().value);
   };
-  const noteFailure = (req) => {
-    for (const key of [`ip:${clientOf(req)}`, 'all']) failures.set(key, [...recent(key), now()]);
-    if (failures.size > 5000) failures.clear();
-  };
+  const accountKey = (name) => [`account:${String(name ?? '').trim().toLowerCase().slice(0, 40)}`];
 
   // Mail sent per target (address or account), so nobody's inbox can be flooded.
   const mailLog = new Map();
@@ -134,8 +156,8 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
   }
   const siteOf = (req) => {
     if (fixedSite) return fixedSite;
-    const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost');
-    const proto = req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    const host = req.publicHost;
+    const proto = req.viaHttps ? 'https' : 'http';
     return { origin: `${proto}://${host}`, rpId: host.replace(/:\d+$/, '') };
   };
   // Passkey challenges awaiting an answer: key -> { challenge, expiresAt }.
@@ -261,7 +283,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       res.end(JSON.stringify(body));
     };
     const route = `${req.method} ${url.pathname}`;
-    const secure = req.headers['x-forwarded-proto'] === 'https';
+    const secure = req.viaHttps;
     const u = sessionUser(req.headers.cookie, data, now());
     const signIn = (user) => ({ 'Set-Cookie': sessionCookie(data.secret, user, secure, now()) });
 
@@ -307,10 +329,14 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       throw new HttpError(404, 'Not found.');
     }
 
-    // Browsers send Origin on cross-site writes; refuse any that are not ours.
-    if (req.method !== 'GET' && req.headers.origin) {
-      const host = req.headers['x-forwarded-host'] || req.headers.host;
-      if (new URL(req.headers.origin).host !== host) throw new HttpError(403, 'Cross-site request refused.');
+    // Writes must come from this site's own pages. Browsers state where a request
+    // came from in Origin or Sec-Fetch-Site; one that states neither is refused
+    // too, rather than given the benefit of the doubt.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const { origin } = req.headers;
+      const fetchSite = req.headers['sec-fetch-site'];
+      const sameSite = origin ? new URL(origin).host === req.publicHost : fetchSite === 'same-origin' || fetchSite === 'none';
+      if (!sameSite) throw new HttpError(403, 'Cross-site request refused.');
     }
 
     // ---------------------------------------------------------- signed out
@@ -321,10 +347,11 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
     if (route === 'POST /api/setup') {
       if (users().length) throw new HttpError(409, 'This site has already been set up.');
-      guardAttempts(req);
+      // The setup code is only six digits, so guesses are also capped across all addresses.
+      guardAttempts(req, ['setup:code']);
       const { username, password, code } = await readJson(req);
       if (!safeEqual(String(code ?? '').trim(), setupCode)) {
-        noteFailure(req);
+        noteFailure(req, ['setup:code']);
         throw new HttpError(403, 'Wrong setup code. It is printed in the server log.');
       }
       requirePassword(password);
@@ -337,9 +364,12 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     if (route === 'POST /api/login') {
       guardAttempts(req);
       const { username, password } = await readJson(req);
+      // Guesses on one account are capped whatever address they come from. The cap
+      // applies to names that do not exist as well, so it reveals nothing.
+      guardAttempts(req, accountKey(username));
       const user = findUser(username ?? '');
       if (!checkPassword(password, user?.auth)) {
-        noteFailure(req);
+        noteFailure(req, accountKey(username));
         throw new HttpError(401, 'Wrong username or password.');
       }
       if (!hasMfa(user)) return reply(200, { ok: true }, signIn(user));
@@ -886,6 +916,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
   async function handleRequest(req, res) {
     let url;
     try {
+      describe(req);
       // Parsed inside the try: a malformed request target must not take the server down.
       url = new URL(req.url, 'http://x');
       if (url.pathname === '/healthz') {
@@ -937,7 +968,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
   const dataKey = process.env.DATA_KEY || '';
   const mailer = createMailer({ apiKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM, publicUrl: process.env.PUBLIC_URL });
-  const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer, publicUrl: process.env.PUBLIC_URL });
+  const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer, publicUrl: process.env.PUBLIC_URL, trustProxy: process.env.TRUST_PROXY === '1' });
+  console.log(process.env.TRUST_PROXY === '1' ? 'Trusting the reverse proxy for visitor addresses and HTTPS.' : 'WARNING: TRUST_PROXY is not set. Behind a reverse proxy, set TRUST_PROXY=1 or sign-in cookies will not be marked Secure and attempt limits will not tell visitors apart.');
   console.log(process.env.TMDB_API_KEY ? 'Movies are on.' : 'Movies are off (needs TMDB_API_KEY).');
   console.log(process.env.ANIMESCHEDULE_TOKEN ? 'Dub dates are on.' : 'Dub dates are off (needs ANIMESCHEDULE_TOKEN).');
   console.log(mailer.enabled ? 'E-mail recovery is on.' : 'E-mail recovery is off (needs RESEND_API_KEY, MAIL_FROM and PUBLIC_URL).');
