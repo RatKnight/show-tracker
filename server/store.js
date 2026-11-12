@@ -38,6 +38,7 @@ export function makeUser(fields) {
     passkeys: [], // { id, name, publicKey, alg, signCount, transports, createdAt }
     recoveryCodes: [], // sha256 of each unused one-time code
     apiTokens: [], // { id, name, hash, createdAt, lastUsedAt } for the browser extension
+    extSeen: {}, // shows seen on a streaming site but not tracked: normalised title -> { title, provider, from, at, tried, show }
     shows: {}, // show key -> { addedAt }; the show itself lives in the shared catalog
     alerts: [],
     alerted: [],

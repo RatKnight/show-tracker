@@ -17,7 +17,8 @@ export function normTitle(s) {
     .replace(/[^a-z0-9]+/g, '');
 }
 
-function sameSeries(a, b) {
+/** Are two normalised titles the same series (one may carry a season suffix)? */
+export function sameSeries(a, b) {
   if (!a || !b) return false;
   if (a === b) return true;
   // "Frieren: Beyond Journey's End" vs "Frieren: Beyond Journey's End Season 2"

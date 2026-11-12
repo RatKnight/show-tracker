@@ -19,6 +19,15 @@ not read anything else and does not talk to anyone else.
 
 After that, visit the history page now and then to sync.
 
+Two more things happen on those visits:
+
+- Shows in your history that you do **not** track are offered under
+  *Discover → For you → From your streaming sites* in Show Tracker, with a
+  *Track* button each and *Track all*.
+- Opening <https://www.crunchyroll.com/watchlist> sends the names of the shows
+  on your watchlist, which are offered in the same place. Nothing is added to
+  your list without you pressing *Track*.
+
 ## Install in Firefox
 
 **For testing** (lasts until Firefox restarts): open `about:debugging` → *This

@@ -1,6 +1,6 @@
 // Runs on crunchyroll.com. When the history page is open, reads the entries
 // that are on screen and passes the finished ones to the background script.
-/* global parseCrunchyrollHistory */
+/* global parseCrunchyrollHistory, parseCrunchyrollWatchlist */
 (() => {
   const api = globalThis.browser ?? globalThis.chrome;
   const sent = new Set(); // entries already passed on during this page visit
@@ -41,7 +41,9 @@
       if (reply?.error !== 'not-configured') say(reply?.error || 'could not reach the extension.');
       return;
     }
-    if (reply.added) say(`${reply.added} episode${reply.added === 1 ? '' : 's'} marked as watched.`);
+    const extra = reply.suggested ? ` ${reply.suggested} show${reply.suggested === 1 ? '' : 's'} you watch but do not track are under Discover in Show Tracker.` : '';
+    if (reply.added) say(`${reply.added} episode${reply.added === 1 ? '' : 's'} marked as watched.${extra}`);
+    else if (extra) say(extra.trim());
     if (reply.pending && retries < 6) {
       // The tracker is still working out how some shows' seasons line up. Offer
       // everything again shortly; what is already marked is simply skipped.
@@ -54,9 +56,35 @@
     }
   }
 
+  const onWatchlist = () => /\/watchlist(\/|$)/.test(location.pathname);
+  const listed = new Set(); // watchlist names already passed on during this page visit
+
+  async function syncWatchlist() {
+    if (!onWatchlist()) return;
+    const fresh = parseCrunchyrollWatchlist(document).filter((name) => !listed.has(name));
+    if (!fresh.length) return;
+    for (const name of fresh) listed.add(name);
+    let reply;
+    try {
+      reply = await api.runtime.sendMessage({ type: 'seen', series: fresh });
+    } catch (e) {
+      reply = { error: e.message };
+    }
+    if (!reply || reply.error) {
+      for (const name of fresh) listed.delete(name);
+      if (reply?.error !== 'not-configured') say(reply?.error || 'could not reach the extension.');
+      return;
+    }
+    if (reply.suggested) say(`${reply.suggested} show${reply.suggested === 1 ? '' : 's'} from your watchlist are waiting under Discover in Show Tracker.`);
+    else say('everything on your watchlist that was read is already tracked or suggested.');
+  }
+
   const schedule = () => {
     clearTimeout(timer);
-    timer = setTimeout(sync, 1500);
+    timer = setTimeout(() => {
+      sync();
+      syncWatchlist();
+    }, 1500);
   };
   // The site loads more entries as you scroll and changes page without reloading.
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });

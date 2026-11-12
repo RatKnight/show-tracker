@@ -440,6 +440,38 @@ function viewDiscover() {
     load('discover', async () => (ui.discover = await call('GET', '/api/discover')));
     const d = ui.discover;
     if (!d) return [...out, empty(ui.loading.discover === 'busy' ? 'Finding suggestions…' : 'No suggestions', ui.loading.discover === 'busy' ? '' : ui.loading.discover || '')];
+    // Shows the browser extension saw on a streaming site that are not on the list.
+    const seen = d.seen || [];
+    if (seen.length || d.seenPending) {
+      const SITES = { crunchyroll: 'Crunchyroll', hidive: 'HIDIVE' };
+      const trackAll = async (e) => {
+        e.target.disabled = true;
+        e.target.textContent = 'Adding…';
+        try {
+          for (const x of seen) await call('POST', '/api/shows', { source: x.source, id: x.id });
+          ui.error = null;
+        } catch (err) {
+          ui.error = err.message;
+        }
+        render();
+      };
+      out.push(
+        h(
+          'section',
+          {},
+          h(
+            'div',
+            { class: 'section-head' },
+            h('h2', {}, `From your streaming sites${seen.length ? ` · ${seen.length}` : ''}`),
+            seen.length > 1 && h('button', { class: 'btn', type: 'button', onclick: trackAll }, `Track all ${seen.length}`),
+          ),
+          seen.length
+            ? tiles(seen, (x) => ({ reason: x.from === 'watchlist' ? `On your ${SITES[x.provider] || 'streaming'} watchlist` : `Watched on ${SITES[x.provider] || 'a streaming site'}`, dismissable: true }))
+            : h('p', { class: 'muted' }, 'Looking up the shows your extension reported…'),
+          d.seenPending > 0 && seen.length > 0 && h('p', { class: 'muted small' }, `${d.seenPending} more still being looked up. Reload in a minute.`),
+        ),
+      );
+    }
     if (!shows().some((s) => s.source === 'anilist')) {
       return [...out, empty('Track some anime first', 'New seasons and recommendations are worked out from the anime on your list.')];
     }
