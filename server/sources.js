@@ -1,7 +1,7 @@
-// Network access. Both APIs are free, need no key, and allow browser requests.
+// Schedule data sources. Both APIs are free and need no key.
 //   Anime: AniList   https://docs.anilist.co
 //   TV:    TVmaze    https://www.tvmaze.com/api
-import { normalizeAnilist, normalizeTvmaze, PAST_WINDOW, FUTURE_WINDOW } from './core.js';
+import { normalizeAnilist, normalizeTvmaze, PAST_WINDOW, FUTURE_WINDOW } from '../app/js/core.js';
 
 const ANILIST = 'https://graphql.anilist.co';
 const TVMAZE = 'https://api.tvmaze.com';
