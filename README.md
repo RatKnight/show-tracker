@@ -77,5 +77,4 @@ npm test
 
 ## License
 
-All rights reserved – see [LICENSE](LICENSE). The code is public for viewing only
-and may not be reused without permission.
+[MIT](LICENSE)
