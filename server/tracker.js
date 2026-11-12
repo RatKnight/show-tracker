@@ -20,6 +20,10 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
   const discoverAttempt = new Map(); // user id -> time of last try
 
   const users = () => Object.values(data.users);
+  const fetchSingle = (source, id) => (source === 'tmdb' ? sources.fetchMovie(id, now()) : sources.fetchTv(id, now()));
+  // Anime films heading for US cinemas, shared by everyone: { list, updatedAt }.
+  let cinema = { list: [], updatedAt: 0 };
+  let cinemaAttempt = 0;
 
   /** A user's tracked shows: catalog entries stamped with when they added them. */
   const showsOf = (u) =>
@@ -32,6 +36,14 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     const wanted = new Set(users().flatMap((u) => Object.keys(u.shows)));
     for (const key of Object.keys(data.catalog)) if (!wanted.has(key)) delete data.catalog[key];
   }
+
+  /** What to say when something comes out: an episode, or a movie's release event. */
+  const releaseText = (ep, where) => {
+    if (ep.event === 'cinema') return ep.label.includes('limited') ? 'Opens in select US cinemas today' : 'Opens in US cinemas today';
+    if (ep.event === 'digital') return `Out digitally today${where ? ` — on ${where}` : ''}`;
+    if (ep.event === 'release') return 'Released today';
+    return `${ep.label}${ep.name && ep.name !== ep.label ? ` “${ep.name}”` : ''} is out${where ? ` on ${where}` : ''}`;
+  };
 
   const snapshotOf = (show) => ({ key: show.key, title: show.title, image: show.image, url: show.url, streams: show.streams, kind: show.kind });
 
@@ -93,7 +105,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
         const where = mine.map((s) => s.name).join(', ');
         return {
           title: show.title,
-          body: `${ep.label}${ep.name && ep.name !== ep.label ? ` “${ep.name}”` : ''} is out${where ? ` on ${where}` : ''}`,
+          body: releaseText(ep, where),
           url: mine[0]?.url || show.url,
           image: show.image,
           at: ep.airsAt,
@@ -212,9 +224,10 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
         failures.push(e.message);
       }
     }
-    for (const s of current.filter((x) => x.source === 'tvmaze')) {
+    // TV shows and movies are fetched one at a time.
+    for (const s of current.filter((x) => x.source !== 'anilist')) {
       try {
-        keep(await sources.fetchTv(s.id, now()));
+        keep(await fetchSingle(s.source, s.id));
       } catch (e) {
         failures.push(e.message);
       }
@@ -240,8 +253,8 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     const toFetch = missing.filter((w) => !data.catalog[keyOf(w)]);
     const animeIds = toFetch.filter((w) => w.source === 'anilist').map((w) => w.id);
     const fetched = animeIds.length ? await sources.fetchAnime(animeIds, now()) : [];
-    for (const w of toFetch.filter((x) => x.source === 'tvmaze')) {
-      const show = await sources.fetchTv(w.id, now()).catch(() => null);
+    for (const w of toFetch.filter((x) => x.source !== 'anilist')) {
+      const show = await fetchSingle(w.source, w.id).catch(() => null);
       if (show) fetched.push(show);
     }
     const asked = new Set(toFetch.map(keyOf));
@@ -287,8 +300,43 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     }
   }
 
+  /**
+   * Refresh the shared list of anime films with a US cinema date, and tell each
+   * user who wants to know about ones they have not been told of yet.
+   */
+  async function refreshCinema() {
+    if (!sources.hasMovies?.()) return cinema;
+    cinema = { list: await sources.fetchCinemaAnime(now()), updatedAt: now() };
+    const day = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    for (const u of users()) {
+      const known = new Set(u.seenCinema || []);
+      const first = !u.seenCinema; // a new account is not told about everything already listed
+      const fresh = cinema.list.filter((m) => !known.has(m.key) && !u.shows[m.key] && m.episodes.some((e) => e.event === 'cinema' && e.airsAt > now()));
+      u.seenCinema = [...new Set([...known, ...cinema.list.map((m) => m.key)])].slice(-2000);
+      if (first || !u.settings.cinemaAlerts || !fresh.length) continue;
+      for (const m of fresh) {
+        pushAlert(u, { showKey: m.key, show: snapshotOf(m), ep: { id: `cinema:${m.key}`, label: 'Coming to US cinemas', airsAt: now() }, read: false });
+      }
+      queue(
+        u,
+        fresh.map((m) => ({
+          title: m.title,
+          body: `Anime film coming to US cinemas on ${day.format(m.episodes.find((e) => e.event === 'cinema').airsAt)}`,
+          url: m.tickets || m.url,
+          image: m.image,
+          at: now(),
+        })),
+      );
+      await flush(u);
+    }
+    store.save();
+    return cinema;
+  }
+
   return {
     showsOf,
+    refreshCinema,
+    cinema: () => cinema,
     checkAlerts,
     flush,
     refreshDiscover,
@@ -302,7 +350,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       return refreshing;
     },
     async addShow(u, source, id) {
-      if (!['anilist', 'tvmaze'].includes(source)) throw new Error('Show not found.');
+      if (!['anilist', 'tvmaze', 'tmdb'].includes(source)) throw new Error('Show not found.');
       const key = `${source}:${id}`;
       if (!u.shows[key] && !(await addMany(u, [{ source, id }]))) throw new Error('Show not found.');
       return key;
@@ -346,6 +394,11 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
           discoverAttempt.set(u.id, now());
           await refreshDiscover(u).catch((e) => console.error('Discover refresh failed:', e.message));
         }
+      }
+      // Cinema listings change slowly: twice a day, retrying hourly on failure.
+      if (sources.hasMovies?.() && now() - cinema.updatedAt > DISCOVER_EVERY && now() - cinemaAttempt > 60 * 60 * 1000) {
+        cinemaAttempt = now();
+        await refreshCinema().catch((e) => console.error('Cinema refresh failed:', e.message));
       }
       await runBackups().catch((e) => console.error('Backup failed:', e.message));
       // Expired invite and reset links are of no further use.

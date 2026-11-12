@@ -38,6 +38,23 @@ function fakeShow(id, clock, extra = {}) {
   };
 }
 
+function fakeMovie(id, clock, extra = {}) {
+  return {
+    key: `tmdb:${id}`,
+    source: 'tmdb',
+    id,
+    kind: 'Movie',
+    title: `Film ${id}`,
+    image: null,
+    url: `https://www.themoviedb.org/movie/${id}`,
+    status: 'Upcoming',
+    tickets: 'https://www.fandango.com/search?q=x',
+    streams: [],
+    episodes: [{ id: `tmdb:${id}:cinema`, event: 'cinema', label: 'In US cinemas', airsAt: clock.t + 60_000, dateOnly: true }],
+    ...extra,
+  };
+}
+
 function fakeSources(clock) {
   return {
     calls: 0,
@@ -59,6 +76,20 @@ function fakeSources(clock) {
     related: new Map(),
     async fetchRelated(ids) {
       return new Map(ids.map((id) => [id, this.related.get(id) || { sequels: [], recs: [] }]));
+    },
+    movies: true,
+    hasMovies() {
+      return this.movies;
+    },
+    async searchMovies(q) {
+      return [fakeMovie(300, clock, { title: q })];
+    },
+    async fetchMovie(id) {
+      return fakeMovie(id, clock);
+    },
+    cinemaList: [],
+    async fetchCinemaAnime() {
+      return this.cinemaList;
     },
     lists: { someone: [5, 6, 7] },
     async fetchUserList(name) {
@@ -935,4 +966,57 @@ test('http: passkeys as a second sign-in step, recovery codes, and no bypass by 
   await lost.req('DELETE', `/api/passkeys?id=${key.id}`);
   const off = (await lost.req('DELETE', `/api/passkeys?id=${phone.id}`)).body;
   assert.deepEqual([off.me.passkeys, off.me.recoveryCodesLeft], [[], 0]);
+});
+
+test('movies: opening-day alert for tracked films, and a heads-up for new anime cinema dates', async () => {
+  const { clock, sent, sources, store, user, tracker, start } = rig();
+  sources.fetchMovie = async (id) => fakeMovie(id, { t: start });
+  const upcoming = (id) => fakeMovie(id, { t: start + 30 * DAY }, { title: `Anime Film ${id}` });
+  // Already listed when this account is first looked at (by the first tick).
+  sources.cinemaList = [upcoming(1), fakeMovie(300, { t: start })];
+  await tracker.addShow(user, 'tmdb', 300);
+  assert.deepEqual(Object.keys(store.data.catalog), ['tmdb:300']);
+  clock.t += 2 * 60_000;
+  await tracker.tick();
+  assert.equal(sent.flat().at(-1).body, 'Opens in US cinemas today');
+
+  // Cinema watch: the first look is silent, later additions are announced once.
+  const before = sent.length;
+  await tracker.refreshCinema();
+  assert.equal(sent.length, before, 'what was already listed is not announced');
+  sources.cinemaList = [upcoming(1), upcoming(2), fakeMovie(300, { t: start })];
+  await tracker.refreshCinema();
+  assert.equal(sent.length, before + 1);
+  assert.equal(sent.at(-1)[0].title, 'Anime Film 2');
+  assert.match(sent.at(-1)[0].body, /^Anime film coming to US cinemas on \w{3} \d+$/);
+  assert.equal(user.alerts[0].ep.label, 'Coming to US cinemas');
+  await tracker.refreshCinema();
+  assert.equal(sent.length, before + 1, 'once only');
+  user.settings.cinemaAlerts = false;
+  sources.cinemaList = [...sources.cinemaList, upcoming(3)];
+  await tracker.refreshCinema();
+  assert.equal(sent.length, before + 1, 'switched off');
+  assert.equal(tracker.cinema().list.length, 4);
+});
+
+test('http: movie routes, and closed when no movie key is configured', async (t) => {
+  const { setupCode, sources, client } = await serve(t);
+  const ann = client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  assert.equal((await ann.req('GET', '/api/state')).body.movies, true);
+  assert.equal((await ann.req('GET', '/api/search?source=movie&q=totoro')).body[0].title, 'totoro');
+  const added = (await ann.req('POST', '/api/shows', { source: 'tmdb', id: 300 })).body;
+  assert.deepEqual(Object.keys(added.shows), ['tmdb:300']);
+  assert.match((await ann.req('GET', `/calendar.ics?token=${added.feedToken}`)).body, /SUMMARY:Film 300 – In US cinemas/);
+  sources.cinemaList = [fakeMovie(1, { t: Date.now() + DAY })];
+  assert.deepEqual((await ann.req('GET', '/api/cinema')).body.list.map((m) => m.key), ['tmdb:1']);
+  assert.equal((await ann.req('PUT', '/api/settings', { cinemaAlerts: false })).body.settings.cinemaAlerts, false);
+  const exported = (await ann.req('GET', '/api/export')).body;
+  assert.deepEqual(exported.shows.map((x) => x.source), ['tmdb']);
+
+  sources.movies = false;
+  assert.equal((await ann.req('GET', '/api/state')).body.movies, false);
+  for (const [m, p, b] of [['GET', '/api/search?source=movie&q=totoro'], ['GET', '/api/cinema'], ['POST', '/api/shows', { source: 'tmdb', id: 301 }]]) {
+    assert.equal((await ann.req(m, p, b)).status, 400, `${m} ${p}`);
+  }
 });

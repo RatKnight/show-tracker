@@ -285,3 +285,4 @@ a.btn { text-decoration: none; display: inline-block; }
 /* ---------- series ---------- */
 .row.nested { margin-left: 28px; background: var(--panel-2); }
 .row.series .title { font-weight: 700; }
+.badge.tickets { color: var(--accent); border-color: var(--accent); }

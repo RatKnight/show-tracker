@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0 }, mail: false };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0 }, mail: false, movies: false };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -16,6 +16,7 @@ const ui = {
   mineOnly: false,
   discover: null, // { sequels, recs, updatedAt }
   seasons: {}, // which -> { season, year, list }
+  cinema: null, // { list, updatedAt } of anime films in US cinemas
   loading: {},
   link: null, // { kind: 'invite' | 'reset' | 'share', token, ... } from the page address
   admin: null, // { users, pendingInvites, encrypted }
@@ -140,6 +141,7 @@ function badges(show, { kind = false } = {}) {
   if (show.streams.length && !myStreams(show, mine).length) {
     out.push(h('span', { class: 'badge warn', title: 'None of the listed streaming sites match your services' }, 'Not on your services'));
   }
+  if (show.tickets) out.push(link(show.tickets, 'Showtimes', 'badge tickets'));
   return h('div', { class: 'badges' }, out);
 }
 
@@ -395,6 +397,7 @@ function viewDiscover() {
     ['foryou', 'For you'],
     ['current', 'This season'],
     ['next', 'Next season'],
+    ...(state.movies ? [['cinema', 'In cinemas']] : []),
   ];
   const bar = h(
     'div',
@@ -447,6 +450,22 @@ function viewDiscover() {
     out.push(
       h('section', {}, h('h2', {}, 'You might like'), d.recs.length ? tiles(d.recs, (s) => ({ reason: `Because you track ${s.because.join(', ')}`, dismissable: true })) : h('p', { class: 'muted' }, 'No recommendations yet.')),
     );
+    return out;
+  }
+
+  if (which === 'cinema') {
+    load('cinema', async () => (ui.cinema = await call('GET', '/api/cinema')));
+    if (!ui.cinema) return [...out, empty(ui.loading.cinema === 'busy' ? 'Checking cinema listings…' : 'Could not load', ui.loading.cinema === 'busy' ? '' : ui.loading.cinema || '')];
+    const soon = ui.cinema.list.filter((m) => nextEpisode(m)?.event === 'cinema');
+    const showing = ui.cinema.list.filter((m) => !soon.includes(m));
+    const whole = ui.mineOnly;
+    ui.mineOnly = false; // the services filter makes no sense for cinema releases
+    out.push(
+      h('section', {}, h('h2', {}, 'Anime films coming to US cinemas'), soon.length ? tiles(soon) : h('p', { class: 'muted' }, 'None announced right now. You will get an alert when one is, unless you switched that off in Settings.')),
+    );
+    if (showing.length) out.push(h('section', {}, h('h2', {}, 'Opened in the last month'), tiles(showing)));
+    ui.mineOnly = whole;
+    out.push(h('p', { class: 'muted small' }, 'Dates are US theatrical releases from TMDB. “Showtimes” searches Fandango for the title. Track a film to get an alert on opening day.'));
     return out;
   }
 
@@ -674,7 +693,7 @@ function viewSettings() {
     h(
       'section',
       {},
-      h('h2', {}, 'Seasons'),
+      h('h2', {}, 'Seasons and films'),
       h(
         'div',
         { class: 'card' },
@@ -685,6 +704,12 @@ function viewSettings() {
           h('label', {}, h('input', { type: 'checkbox', checked: s.autoTrackSeasons, onchange: (e) => act('PUT', '/api/settings', { autoTrackSeasons: e.target.checked }) }), 'Track new seasons of my anime automatically when they are announced'),
         ),
         h('p', { class: 'muted small' }, 'A season you remove yourself is not added back.'),
+        state.movies &&
+          h(
+            'div',
+            { class: 'checks' },
+            h('label', {}, h('input', { type: 'checkbox', checked: s.cinemaAlerts, onchange: (e) => act('PUT', '/api/settings', { cinemaAlerts: e.target.checked }) }), 'Tell me when an anime film gets a US cinema date'),
+          ),
       ),
     ),
     h(
@@ -1619,6 +1644,7 @@ function render() {
 
   document.title = unread ? `(${unread}) Show Tracker` : 'Show Tracker';
 
+  syncSearchSources();
   const profileBtn = $('profile-btn');
   profileBtn.textContent = (state.me.username[0] || '?').toUpperCase();
   profileBtn.title = `Profile: ${state.me.username}`;
@@ -1662,6 +1688,12 @@ async function refreshAll() {
 
 const searchInput = $('search-input');
 const searchSource = $('search-source');
+/** Offer movie search only where the server has a movie data key. */
+function syncSearchSources() {
+  const has = Boolean(searchSource.querySelector('option[value="movie"]'));
+  if (state.movies && !has) searchSource.append(h('option', { value: 'movie' }, 'Movies'));
+  if (!state.movies && has) searchSource.querySelector('option[value="movie"]').remove();
+}
 const resultsEl = $('search-results');
 let searchSeq = 0;
 let searchTimer = null;
@@ -1702,7 +1734,7 @@ async function runSearch() {
   try {
     const found = await call('GET', `/api/search?source=${searchSource.value}&q=${encodeURIComponent(q)}`);
     if (seq !== searchSeq) return;
-    resultsEl.replaceChildren(...(found.length ? found.map(resultRow) : [h('div', { class: 'empty' }, `No ${searchSource.value === 'anime' ? 'anime' : 'TV shows'} found for “${q}”.`)]));
+    resultsEl.replaceChildren(...(found.length ? found.map(resultRow) : [h('div', { class: 'empty' }, `No ${{ anime: 'anime', tv: 'TV shows', movie: 'movies' }[searchSource.value]} found for “${q}”.`)]));
   } catch (e) {
     if (seq !== searchSeq) return;
     resultsEl.replaceChildren(h('div', { class: 'empty' }, `Search failed: ${e.message}`));
