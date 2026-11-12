@@ -9,6 +9,7 @@ const token = (bytes = 18) => randomBytes(bytes).toString('hex');
 
 const settingsDefaults = () => ({
   services: [...DEFAULT_SERVICES],
+  region: 'US', // country used for streaming availability and premieres
   ntfyUrl: '',
   discordWebhook: '',
   alertMode: 'instant', // or 'digest'
@@ -151,6 +152,7 @@ export function openStore(dir, { dataKey = '' } = {}) {
     secret: token(32),
     users: {},
     catalog: {}, // show key -> schedule data, shared by everyone tracking it
+    availability: {}, // show key -> { tmdbId, byRegion: { US: [service names] }, links, at }: where it streams
     franchise: {}, // anime show key -> { root, offset, index, count, at }: its place among its seasons
     invites: {}, // sha256(token) -> { expiresAt }
     resets: {}, // sha256(token) -> { userId, expiresAt }

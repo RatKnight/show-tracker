@@ -17,6 +17,7 @@ const ui = {
   discover: null, // { sequels, recs, updatedAt }
   seasons: {}, // which -> { season, year, list }
   cinema: null, // { list, updatedAt } of anime films in US cinemas
+  premieres: null, // { region, list } of streaming season premieres
   loading: {},
   link: null, // { kind: 'invite' | 'reset' | 'share', token, ... } from the page address
   admin: null, // { users, invites, encrypted, mail, movies }
@@ -128,6 +129,24 @@ function weekStart() {
   }
   return 0;
 }
+
+const REGIONS = [
+  ['US', 'United States'],
+  ['CA', 'Canada'],
+  ['GB', 'United Kingdom'],
+  ['IE', 'Ireland'],
+  ['AU', 'Australia'],
+  ['NZ', 'New Zealand'],
+  ['DE', 'Germany'],
+  ['FR', 'France'],
+  ['ES', 'Spain'],
+  ['IT', 'Italy'],
+  ['NL', 'Netherlands'],
+  ['SE', 'Sweden'],
+  ['BR', 'Brazil'],
+  ['MX', 'Mexico'],
+  ['JP', 'Japan'],
+];
 
 // ---------------------------------------------------------------- components
 
@@ -402,6 +421,7 @@ function viewDiscover() {
     ['foryou', 'For you'],
     ['current', 'This season'],
     ['next', 'Next season'],
+    ['premieres', 'New on streaming'],
     ...(state.movies ? [['cinema', 'In cinemas']] : []),
   ];
   const bar = h(
@@ -490,6 +510,28 @@ function viewDiscover() {
     return out;
   }
 
+  if (which === 'premieres') {
+    const region = state.settings.region || 'US';
+    // Reload when the country changes.
+    if (ui.premieres && ui.premieres.region !== region) {
+      ui.premieres = null;
+      delete ui.loading.premieres;
+    }
+    load('premieres', async () => (ui.premieres = await call('GET', '/api/premieres')));
+    if (!ui.premieres) return [...out, empty(ui.loading.premieres === 'busy' ? 'Checking the next two weeks…' : 'Could not load', ui.loading.premieres === 'busy' ? '' : ui.loading.premieres || '')];
+    const country = (REGIONS.find(([code]) => code === ui.premieres.region) || [])[1] || ui.premieres.region;
+    out.push(
+      h(
+        'section',
+        {},
+        h('h2', {}, `Season premieres on streaming · next two weeks · ${country}`),
+        ui.premieres.list.length ? tiles(ui.premieres.list, (x) => ({ reason: x.premiere })) : h('p', { class: 'muted' }, 'Nothing listed.'),
+      ),
+    );
+    out.push(h('p', { class: 'muted small' }, 'From TVmaze’s streaming schedule: first episodes of new series and new seasons. Tick “Only on my services” above to narrow it down. Change the country in Settings.'));
+    return out;
+  }
+
   if (which === 'cinema') {
     load('cinema', async () => (ui.cinema = await call('GET', '/api/cinema')));
     if (!ui.cinema) return [...out, empty(ui.loading.cinema === 'busy' ? 'Checking cinema listings…' : 'Could not load', ui.loading.cinema === 'busy' ? '' : ui.loading.cinema || '')];
@@ -519,9 +561,23 @@ function viewDiscover() {
 function viewWatchNext() {
   const watched = new Set(state.watched);
   const now = Date.now();
-  const rows = shows()
+  const each = shows()
     .map((show) => ({ show, st: watchState(show, watched, state.progress[show.key] || 0, now) }))
     .filter((x) => x.st && x.st.behind > 0);
+  // Seasons of one series share a row: the earliest season with something left
+  // is the one to watch next, and the count covers all of them.
+  const grouped = new Map();
+  for (const x of each) {
+    const id = state.series[x.show.key]?.id || x.show.key;
+    grouped.set(id, [...(grouped.get(id) || []), x]);
+  }
+  const rows = [...grouped.values()].map((parts) => {
+    if (parts.length === 1) return parts[0];
+    const ordered = [...parts].sort((a, b) => (a.show.year || 9999) - (b.show.year || 9999) || a.show.title.localeCompare(b.show.title));
+    const lead = ordered[0];
+    const started = parts.some((p) => p.st.started) || shows().some((sh) => state.series[sh.key]?.id === state.series[lead.show.key].id && (state.progress[sh.key] || 0) > 0);
+    return { ...lead, st: { ...lead.st, started }, seriesTitle: state.series[lead.show.key].title, seasons: parts.length, totalBehind: parts.reduce((n, p) => n + p.st.behind, 0) };
+  });
   if (!shows().length) return empty('Nothing tracked yet', 'Add shows with the search box above.');
   if (!rows.length) return empty('All caught up', 'Nothing you track has an episode waiting. Films are not listed here.');
 
@@ -530,7 +586,7 @@ function viewWatchNext() {
     // Other sources: mark each recent episode.
     return act('POST', '/api/watched', { ids: show.episodes.filter((e) => e.airsAt <= now).map((e) => e.id) });
   };
-  const row = ({ show, st }) => {
+  const row = ({ show, st, seriesTitle, seasons, totalBehind }) => {
     const mine = myStreams(show, state.settings.services)[0];
     return h(
       'div',
@@ -539,8 +595,14 @@ function viewWatchNext() {
       h(
         'div',
         { class: 'body' },
-        h('div', { class: 'title' }, link(show.url, show.title)),
-        h('div', { class: 'sub' }, `Next: ${st.next.label} · ${st.behind} to watch${show.source === 'anilist' && show.total ? ` of ${show.total}` : ''}`),
+        h('div', { class: 'title' }, link(show.url, seriesTitle || show.title)),
+        h(
+          'div',
+          { class: 'sub' },
+          seriesTitle
+            ? `Next: ${show.title} — ${st.next.label} · ${totalBehind} to watch across ${seasons} seasons`
+            : `Next: ${st.next.label} · ${st.behind} to watch${show.source === 'anilist' && show.total ? ` of ${show.total}` : ''}`,
+        ),
       ),
       h(
         'div',
@@ -779,6 +841,17 @@ function viewSettings() {
         { class: 'card' },
         h('p', { class: 'muted' }, 'Shows are tagged with where they stream. Services you tick here are highlighted, and shows that are not on any of them get a warning.'),
         h(
+          'label',
+          { class: 'field', for: 'region' },
+          'Country (for where shows stream and for premieres)',
+          h(
+            'select',
+            { id: 'region', onchange: (e) => act('PUT', '/api/settings', { region: e.target.value }) },
+            REGIONS.map(([code, name]) => h('option', { value: code, selected: (s.region || 'US') === code }, name)),
+          ),
+        ),
+        h('p', { class: 'muted small' }, state.movies ? 'Badges on your tracked shows follow this country once looked up (a few minutes after adding a show).' : 'Country-specific badges need the movie data key on the server; until then badges are not tied to a country.'),
+        h(
           'div',
           { class: 'checks' },
           Object.entries(SERVICES).map(([id, name]) =>
@@ -1003,7 +1076,7 @@ function viewSettings() {
       h(
         'div',
         { class: 'card' },
-        h('p', { class: 'muted' }, 'Anime schedules come from AniList and TV schedules from TVmaze. Anime times are the Japanese broadcast time; the episode usually reaches Crunchyroll or HIDIVE within an hour or so, but some simulcasts are delayed. Streaming-site tags are not region-specific, so double-check availability in your country.'),
+        h('p', { class: 'muted' }, 'Anime schedules come from AniList and TV schedules from TVmaze. Films and country-specific streaming availability come from TMDB, with availability supplied by JustWatch. Anime times are the Japanese broadcast time; the episode usually reaches Crunchyroll or HIDIVE within an hour or so, but some simulcasts are delayed. Where a show has not been looked up yet, its streaming tags are not tied to a country.'),
       ),
     ),
   ];
@@ -2016,7 +2089,27 @@ function closeResults() {
   resultsEl.replaceChildren();
 }
 
-function resultRow(show) {
+/** A title reduced to letters and digits, for spotting seasons of the same series. */
+const plainTitle = (t) => String(t || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/×/g, 'x').replace(/[^a-z0-9]+/g, '');
+
+/**
+ * Group search results so later seasons sit under the series they belong to:
+ * "Show", "Show Season 2", "Show Season 3" become one entry with two seasons beneath.
+ */
+function foldSeasons(found) {
+  const groups = [];
+  // Shortest title first, so the base series becomes the head of its group.
+  for (const show of [...found].sort((a, b) => plainTitle(a.title).length - plainTitle(b.title).length)) {
+    const name = plainTitle(show.title);
+    const head = show.source === 'anilist' ? groups.find((g) => g.show.source === 'anilist' && g.name.length >= 6 && name.startsWith(g.name)) : null;
+    if (head) head.seasons.push(show);
+    else groups.push({ show, name, seasons: [] });
+  }
+  // Keep the search's own order of the heads.
+  return groups.sort((a, b) => found.indexOf(a.show) - found.indexOf(b.show)).map((g) => ({ ...g, seasons: g.seasons.sort((a, b) => (a.year || 9999) - (b.year || 9999)) }));
+}
+
+function resultRow(show, nested = false) {
   const tracked = Boolean(state.shows[show.key]);
   const btn = h('button', { class: `btn${tracked ? '' : ' primary'}`, type: 'button', disabled: tracked }, tracked ? 'Added' : 'Add');
   btn.addEventListener('click', async () => {
@@ -2035,7 +2128,7 @@ function resultRow(show) {
     }
   });
   const sub = [show.year, show.status, show.altTitle].filter(Boolean).join(' · ');
-  return h('div', { class: 'row' }, thumb(show), h('div', { class: 'body' }, h('div', { class: 'title' }, show.title), h('div', { class: 'sub' }, sub), badges(show)), btn);
+  return h('div', { class: `row${nested ? ' nested' : ''}` }, thumb(show), h('div', { class: 'body' }, h('div', { class: 'title' }, show.title), h('div', { class: 'sub' }, sub), badges(show)), btn);
 }
 
 async function runSearch() {
@@ -2047,7 +2140,7 @@ async function runSearch() {
   try {
     const found = await call('GET', `/api/search?source=${searchSource.value}&q=${encodeURIComponent(q)}`);
     if (seq !== searchSeq) return;
-    resultsEl.replaceChildren(...(found.length ? found.map(resultRow) : [h('div', { class: 'empty' }, `No ${{ anime: 'anime', tv: 'TV shows', movie: 'movies' }[searchSource.value]} found for “${q}”.`)]));
+    resultsEl.replaceChildren(...(found.length ? foldSeasons(found).flatMap(({ show, seasons }) => [resultRow(show), ...seasons.map((x) => resultRow(x, true))]) : [h('div', { class: 'empty' }, `No ${{ anime: 'anime', tv: 'TV shows', movie: 'movies' }[searchSource.value]} found for “${q}”.`)]));
   } catch (e) {
     if (seq !== searchSeq) return;
     resultsEl.replaceChildren(h('div', { class: 'empty' }, `Search failed: ${e.message}`));

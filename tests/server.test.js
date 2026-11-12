@@ -7,7 +7,7 @@ import { createApp } from '../server.js';
 import { openStore, makeUser } from '../server/store.js';
 import { createTracker } from '../server/tracker.js';
 import { buildIcs } from '../server/ics.js';
-import { computeDiscover, buildSeries } from '../server/discover.js';
+import { computeDiscover, buildSeries, withFranchiseRoots } from '../server/discover.js';
 import { localClock, inQuietHours, summarize } from '../server/timing.js';
 import { buildBackup, readBackup, writeSnapshot } from '../server/backup.js';
 import { createMailer, cleanEmail } from '../server/mail.js';
@@ -91,6 +91,15 @@ function fakeSources(clock) {
     franchises: {},
     async fetchFranchise(id) {
       return this.franchises[id] || { root: `Show ${id}`, offset: 0, index: 1, count: 12 };
+    },
+    availability: {},
+    async fetchAvailability(show, regions) {
+      this.asked = [...(this.asked || []), show.title];
+      const by = this.availability[show.title] || {};
+      return { tmdbId: 1, byRegion: Object.fromEntries(regions.map((r) => [r, by[r] || []])), links: Object.fromEntries(regions.map((r) => [r, `https://tmdb.example/watch?locale=${r}`])) };
+    },
+    async fetchPremieres(region) {
+      return [fakeShow(800, clock, { key: 'tvmaze:800', source: 'tvmaze', title: `Premiere in ${region}`, premiere: 'New series' })];
     },
     cinemaList: [],
     async fetchCinemaAnime() {
@@ -1284,4 +1293,68 @@ test('http: account owners are e-mailed when an admin acts on their account', as
   // Site settings are admin-only and take only the known switches.
   const site = (await ann.req('PUT', '/api/admin/site', { backupEmail: false, healthAlerts: 'yes', other: 1 })).body.site;
   assert.deepEqual(site, { backupEmail: false, healthAlerts: true });
+});
+
+// ---------------------------------------------------------------- more sources, series folding
+
+test('series: seasons are grouped by shared first season even without sequel links; recommendations list one season per series', async () => {
+  const clock = { t: Date.UTC(2026, 10, 12) };
+  const s = (id, title, year) => fakeShow(id, clock, { title, year });
+  const shows = [s(1, 'Demon Slayer', 2019), s(2, 'Demon Slayer: Swordsmith Village Arc', 2023), s(3, 'Unrelated', 2020), s(4, 'Lonely Season 2', 2024)];
+  const franchise = { 'anilist:1': { root: 'Demon Slayer' }, 'anilist:2': { root: 'Demon Slayer' }, 'anilist:3': { root: 'Unrelated' }, 'anilist:4': { root: 'Lonely' } };
+  assert.deepEqual(withFranchiseRoots({}, shows, franchise), {
+    'anilist:1': { id: 'anilist:1', title: 'Demon Slayer' },
+    'anilist:2': { id: 'anilist:1', title: 'Demon Slayer' },
+  });
+  // An existing group gains the member its links missed, and keeps its name.
+  const linked = { 'anilist:1': { id: 'anilist:1', title: 'Demon Slayer' }, 'anilist:9': { id: 'anilist:1', title: 'Demon Slayer' } };
+  assert.equal(withFranchiseRoots(linked, shows, franchise)['anilist:2'].id, 'anilist:1');
+  assert.deepEqual(withFranchiseRoots({}, [shows[2], shows[3]], franchise), {}, 'single seasons are not series');
+
+  const sources = fakeSources(clock);
+  sources.related.set(1, { sequels: [], recs: [{ rating: 9, media: media(51, 'Other Show Season 2') }, { rating: 8, media: media(50, 'Other Show') }, { rating: 7, media: media(52, 'Other Show Season 3') }, { rating: 6, media: media(60, 'Different') }] });
+  const d = await computeDiscover({ shows: [shows[0]], sources, now: clock.t });
+  assert.deepEqual(d.recs.map((r) => r.title), ['Other Show', 'Different'], 'one entry per series, shown as its first season');
+});
+
+test('streaming availability by country replaces the generic badges', async () => {
+  const { store, sources, user, tracker } = rig();
+  await tracker.addShow(user, 'anilist', 5);
+  assert.deepEqual(tracker.showsOf(user)[0].streams.map((x) => x.name), ['Crunchyroll'], 'the source\'s own links until looked up');
+  assert.equal(await tracker.fillAvailability(), 0, 'anime wait for their first-season title');
+
+  sources.franchises[5] = { root: 'Show Five', offset: 0, index: 1, count: 12 };
+  sources.availability['Show Five'] = { US: ['Netflix', 'Crunchyroll', 'Crunchyroll Amazon Channel', 'Netflix Standard with Ads', 'Obscure Stream'], GB: ['Disney Plus'] };
+  await tracker.fillFranchises();
+  assert.equal(await tracker.fillAvailability(), 1);
+  assert.deepEqual(sources.asked, ['Show Five'], 'searched by the series name, not the season');
+  const us = tracker.showsOf(user)[0];
+  assert.deepEqual(us.streams.map((x) => [x.id, x.name]), [['netflix', 'Netflix'], ['crunchyroll', 'Crunchyroll'], [null, 'Obscure Stream']]);
+  assert.equal(us.streams[1].url, 'https://crunchyroll.com/x', 'keeps the direct link where the source had one');
+  assert.equal(us.streams[0].url, 'https://tmdb.example/watch?locale=US');
+  assert.equal(us.streamsRegion, 'US');
+  assert.equal(await tracker.fillAvailability(), 0, 'cached for a week');
+
+  // Another country is looked up when a user moves there.
+  user.settings.region = 'GB';
+  assert.equal(await tracker.fillAvailability(), 1);
+  assert.deepEqual(tracker.showsOf(user)[0].streams.map((x) => x.id), ['disney']);
+  // Nothing listed for a country: the source's own links stay.
+  user.settings.region = 'DE';
+  await tracker.fillAvailability();
+  assert.deepEqual(tracker.showsOf(user)[0].streams.map((x) => x.name), ['Crunchyroll']);
+  tracker.removeShow(user, 'anilist:5');
+  assert.deepEqual(store.data.availability, {});
+});
+
+test('http: region setting and premieres', async (t) => {
+  const { setupCode, client } = await serve(t);
+  const ann = client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  assert.equal((await ann.req('GET', '/api/state')).body.settings.region, 'US');
+  assert.equal((await ann.req('PUT', '/api/settings', { region: 'gb' })).body.settings.region, 'US', 'must be a two-letter country code in capitals');
+  assert.deepEqual((await ann.req('GET', '/api/premieres')).body.list.map((x) => x.title), ['Premiere in US']);
+  assert.equal((await ann.req('PUT', '/api/settings', { region: 'GB' })).body.settings.region, 'GB');
+  const p = (await ann.req('GET', '/api/premieres')).body;
+  assert.deepEqual([p.region, p.list[0].title, p.list[0].premiere], ['GB', 'Premiere in GB', 'New series']);
 });

@@ -1,6 +1,7 @@
 // Suggestions built from the tracked list: new seasons of shows you follow, and
 // what viewers of those shows recommend.
 import { normalizeAnilist } from '../app/js/core.js';
+import { normTitle, sameSeries } from './extmatch.js';
 
 const MAX_RECS = 40;
 
@@ -55,8 +56,7 @@ export async function computeDiscover({ shows, sources, now = Date.now() }) {
     sequels: [...sequels.values()]
       .map(({ media, from, fromKey }) => ({ ...normalizeAnilist(media, undefined, now), from, fromKey, fresh: media.status === 'NOT_YET_RELEASED' || media.status === 'RELEASING' }))
       .sort((a, b) => b.fresh - a.fresh || (b.year || 0) - (a.year || 0) || a.title.localeCompare(b.title)),
-    recs: [...votes.values()]
-      .sort((a, b) => b.score - a.score || (b.media.averageScore || 0) - (a.media.averageScore || 0))
+    recs: oneSeasonEach([...votes.values()].sort((a, b) => b.score - a.score || (b.media.averageScore || 0) - (a.media.averageScore || 0)))
       .slice(0, MAX_RECS)
       .map(({ media, because }) => ({ ...normalizeAnilist(media, undefined, now), because: because.slice(0, 3) })),
   };
@@ -93,4 +93,44 @@ export function buildSeries(shows, links) {
     for (const s of members) series[s.key] = { id: first.key, title: first.title };
   }
   return series;
+}
+
+/** Keep one entry per series: later seasons of something already listed are dropped. */
+function oneSeasonEach(ranked) {
+  const kept = [];
+  for (const v of ranked) {
+    const name = normTitle(v.media.title?.english || v.media.title?.romaji);
+    const twin = kept.find((k) => sameSeries(k.name, name));
+    if (!twin) kept.push({ ...v, name });
+    // Prefer the first season (the shorter title) as the one shown.
+    else if (name.length < twin.name.length) Object.assign(twin, { ...v, name, score: twin.score, because: twin.because });
+  }
+  return kept;
+}
+
+/**
+ * Extend a series map with what the prequel lookups know: tracked anime that
+ * share a first season belong together even when their sequel links did not
+ * connect them (a film or special in between, or suggestions not built yet).
+ * franchise: { [showKey]: { root } }.
+ */
+export function withFranchiseRoots(series, shows, franchise) {
+  const out = { ...series };
+  const byRoot = new Map();
+  for (const s of shows) {
+    const root = s.source === 'anilist' ? normTitle(franchise[s.key]?.root) : '';
+    if (root) byRoot.set(root, [...(byRoot.get(root) || []), s]);
+  }
+  for (const members of byRoot.values()) {
+    const known = members.map((s) => out[s.key]).find(Boolean);
+    if (members.length < 2 && !known) continue;
+    const first = [...members].sort((a, b) => (a.year || 9999) - (b.year || 9999) || a.id - b.id)[0];
+    const label = known || { id: first.key, title: franchise[first.key].root || first.title };
+    for (const s of members) out[s.key] ||= label;
+  }
+  // A "series" of one is not a series.
+  const sizes = new Map();
+  for (const v of Object.values(out)) sizes.set(v.id, (sizes.get(v.id) || 0) + 1);
+  for (const [k, v] of Object.entries(out)) if (sizes.get(v.id) < 2) delete out[k];
+  return out;
 }

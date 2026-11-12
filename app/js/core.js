@@ -207,6 +207,7 @@ export function normalizeTvmaze(s, now = Date.now()) {
     url: s.url || null,
     status: TVMAZE_STATUS[s.status] || s.status || 'Unknown',
     year: s.premiered ? Number(s.premiered.slice(0, 4)) : null,
+    imdb: s.externals?.imdb || null,
     note: null,
     streams,
     episodes,

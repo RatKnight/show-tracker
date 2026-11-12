@@ -3,8 +3,8 @@
 // Schedules live once in a shared catalog; each user holds only the keys of the
 // shows they track plus their own alerts, watched marks and settings. Every
 // function that touches personal data takes the user it acts for.
-import { collectAlerts, myStreams } from '../app/js/core.js';
-import { computeDiscover, buildSeries } from './discover.js';
+import { collectAlerts, myStreams, serviceId } from '../app/js/core.js';
+import { computeDiscover, buildSeries, withFranchiseRoots } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
 import { readFileSync } from 'node:fs';
 import { buildBackup, writeSnapshot } from './backup.js';
@@ -28,17 +28,74 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
   let cinema = { list: [], updatedAt: 0 };
   let cinemaAttempt = 0;
 
+  // Bundles and ad tiers of a service the list already names.
+  const NOT_A_SERVICE = /Amazon Channel|Apple TV Channel|Roku Premium Channel|with Ads/i;
+
+  /** Replace a show's streaming badges with what is actually offered in a country, when known. */
+  function localStreams(show, region) {
+    const known = data.availability[show.key];
+    const names = known?.byRegion?.[region];
+    if (!names?.length) return show;
+    const seen = new Set();
+    const streams = [];
+    for (const name of names) {
+      if (NOT_A_SERVICE.test(name)) continue;
+      const id = serviceId(name);
+      if (seen.has(id || name)) continue;
+      seen.add(id || name);
+      // Keep the source's direct link to the show where there is one.
+      streams.push({ id, name, url: show.streams.find((x) => x.id && x.id === id)?.url || known.links?.[region] || null });
+    }
+    return streams.length ? { ...show, streams, streamsRegion: region } : show;
+  }
+
   /** A user's tracked shows: catalog entries stamped with when they added them. */
   const showsOf = (u) =>
     Object.entries(u.shows)
       .filter(([key]) => data.catalog[key])
-      .map(([key, { addedAt }]) => ({ ...data.catalog[key], addedAt }));
+      .map(([key, { addedAt }]) => ({ ...localStreams(data.catalog[key], u.settings.region || 'US'), addedAt }));
+
+  /** Which of a user's tracked anime are seasons of the same series. */
+  const seriesOf = (u) => withFranchiseRoots(u.discover?.series || {}, showsOf(u), data.franchise);
+
+  /**
+   * Look up where tracked series stream, for every country a user has chosen.
+   * A few per call; refreshed weekly. Anime wait for their first-season title,
+   * which is what the lookup searches for.
+   */
+  async function fillAvailability(limit = 3) {
+    if (!sources.hasMovies?.() || !sources.fetchAvailability) return 0;
+    const regions = [...new Set(users().map((u) => u.settings.region || 'US'))];
+    const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+    const due = Object.values(data.catalog)
+      .filter((s) => s.source === 'anilist' || s.source === 'tvmaze')
+      .filter((s) => s.source !== 'anilist' || data.franchise[s.key])
+      .filter((s) => {
+        const a = data.availability[s.key];
+        return !a || now() - a.at > WEEK_MS || regions.some((r) => !(r in (a.byRegion || {})));
+      })
+      .slice(0, limit);
+    for (const s of due) {
+      const anime = s.source === 'anilist';
+      try {
+        const found = await sources.fetchAvailability({ title: anime ? data.franchise[s.key].root || s.title : s.title, altTitle: s.altTitle, imdb: s.imdb, anime }, regions);
+        data.availability[s.key] = { ...found, at: now() };
+      } catch (e) {
+        // Try again tomorrow rather than on every pass.
+        data.availability[s.key] = { ...(data.availability[s.key] || { tmdbId: null, byRegion: Object.fromEntries(regions.map((r) => [r, []])), links: {} }), at: now() - WEEK_MS + 24 * 60 * 60 * 1000 };
+        console.error(`Availability lookup failed for ${s.key}:`, e.message);
+      }
+    }
+    if (due.length) store.save();
+    return due.length;
+  }
 
   /** Drop catalog entries nobody tracks any more. */
   function pruneCatalog() {
     const wanted = new Set(users().flatMap((u) => Object.keys(u.shows)));
     for (const key of Object.keys(data.catalog)) if (!wanted.has(key)) delete data.catalog[key];
     for (const key of Object.keys(data.franchise)) if (!wanted.has(key)) delete data.franchise[key];
+    for (const key of Object.keys(data.availability)) if (!wanted.has(key)) delete data.availability[key];
   }
 
   /**
@@ -510,6 +567,8 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
 
   return {
     showsOf,
+    seriesOf,
+    fillAvailability,
     emailBackup,
     checkHealth,
     reportWatched,
@@ -586,6 +645,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
         await refreshCinema().catch((e) => console.error('Cinema refresh failed:', e.message));
       }
       await fillFranchises().catch((e) => console.error('Franchise lookup failed:', e.message));
+      await fillAvailability().catch((e) => console.error('Availability lookup failed:', e.message));
       await emailBackup().catch((e) => console.error('Backup e-mail failed:', e.message));
       await checkHealth().catch((e) => console.error('Health check failed:', e.message));
       await runBackups().catch((e) => console.error('Backup failed:', e.message));
