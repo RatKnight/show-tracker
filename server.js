@@ -9,7 +9,8 @@ import { SERVICES, animeSeason } from './app/js/core.js';
 import { openStore } from './server/store.js';
 import { createTracker } from './server/tracker.js';
 import { hashPassword, checkPassword, sessionCookie, clearCookie, hasSession, safeEqual } from './server/auth.js';
-import { sendAlerts, validateChannels } from './server/notify.js';
+import { sendAlerts, sendDiscordFile, validateChannels } from './server/notify.js';
+import { buildBackup, readBackup } from './server/backup.js';
 import { buildIcs } from './server/ics.js';
 import { validTimeZone } from './server/timing.js';
 import * as liveSources from './server/sources.js';
@@ -20,6 +21,8 @@ const TYPES = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json',
 };
 const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -40,13 +43,13 @@ class HttpError extends Error {
   }
 }
 
-async function readJson(req) {
+async function readJson(req, limit = 64 * 1024) {
   if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) throw new HttpError(415, 'Expected JSON.');
   let size = 0;
   const chunks = [];
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 64 * 1024) throw new HttpError(413, 'Request too large.');
+    if (size > limit) throw new HttpError(413, 'Request too large.');
     chunks.push(chunk);
   }
   try {
@@ -58,10 +61,10 @@ async function readJson(req) {
   throw new HttpError(400, 'Invalid JSON.');
 }
 
-export function createApp({ dataDir, sources = liveSources, send = sendAlerts, now = Date.now } = {}) {
+export function createApp({ dataDir, sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, now = Date.now } = {}) {
   const store = openStore(dataDir);
   const { data } = store;
-  const tracker = createTracker({ store, sources, send, now });
+  const tracker = createTracker({ store, sources, send, sendFile, now });
   // Until a password exists, creating one needs this code from the server log,
   // so a stranger who finds the site first cannot claim it.
   const setupCode = data.auth ? null : String(randomInt(0, 1_000_000)).padStart(6, '0');
@@ -195,6 +198,7 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, n
           quietEnd: 'quietEnd' in body ? hour(body.quietEnd, cur.quietEnd) : cur.quietEnd,
           remindMinutes: [0, 10, 30, 60].includes(body.remindMinutes) ? body.remindMinutes : cur.remindMinutes,
           timeZone: validTimeZone(body.timeZone) ? body.timeZone : cur.timeZone,
+          backupToDiscord: typeof body.backupToDiscord === 'boolean' ? body.backupToDiscord : cur.backupToDiscord,
         };
         const problem = validateChannels(next);
         if (problem) throw new HttpError(400, problem);
@@ -219,6 +223,41 @@ export function createApp({ dataDir, sources = liveSources, send = sendAlerts, n
         data.muted = muted === false ? data.muted.filter((k) => k !== key) : [...new Set([...data.muted, key])];
         store.save();
         return reply(200, publicState());
+      }
+
+      case 'GET /api/export': {
+        const day = new Date(now()).toISOString().slice(0, 10);
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Disposition': `attachment; filename="show-tracker-backup-${day}.json"`,
+          'Cache-Control': 'no-store',
+          ...securityHeaders(req),
+        });
+        return res.end(JSON.stringify(buildBackup(data, now()), null, 1));
+      }
+
+      case 'POST /api/import': {
+        let backup;
+        try {
+          backup = readBackup(await readJson(req, 1024 * 1024));
+        } catch (e) {
+          throw e instanceof HttpError ? e : new HttpError(400, e.message);
+        }
+        const added = await tracker.addMany(backup.shows);
+        data.watched = [...new Set([...data.watched, ...backup.watched])].slice(-5000);
+        data.muted = [...new Set([...data.muted, ...backup.muted])].filter((k) => Object.hasOwn(data.shows, k));
+        data.dismissed = [...new Set([...data.dismissed, ...backup.dismissed])].slice(-2000);
+        if (Array.isArray(backup.settings.services)) data.settings.services = backup.settings.services.filter((x) => Object.hasOwn(SERVICES, x));
+        store.save();
+        return reply(200, { ...publicState(), added, skipped: backup.shows.length - added });
+      }
+
+      case 'POST /api/import/anilist': {
+        const { username } = await readJson(req);
+        if (typeof username !== 'string' || !/^[\w-]{2,30}$/.test(username.trim())) throw new HttpError(400, 'Enter an AniList username.');
+        const ids = (await sources.fetchUserList(username.trim())).slice(0, 300);
+        const added = await tracker.addMany(ids.map((id) => ({ source: 'anilist', id })));
+        return reply(200, { ...publicState(), added, skipped: ids.length - added });
       }
 
       case 'POST /api/refresh':

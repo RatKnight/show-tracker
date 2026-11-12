@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server.js';
@@ -9,6 +9,7 @@ import { createTracker } from '../server/tracker.js';
 import { buildIcs } from '../server/ics.js';
 import { computeDiscover } from '../server/discover.js';
 import { localClock, inQuietHours, summarize } from '../server/timing.js';
+import { buildBackup, readBackup, writeSnapshot } from '../server/backup.js';
 import { validateChannels, parseNtfy, ntfyPayloads, discordPayloads } from '../server/notify.js';
 import { hashPassword, checkPassword, sessionCookie, hasSession } from '../server/auth.js';
 import { DAY } from '../app/js/core.js';
@@ -55,6 +56,11 @@ function fakeSources(clock) {
     related: new Map(),
     async fetchRelated(ids) {
       return new Map(ids.map((id) => [id, this.related.get(id) || { sequels: [], recs: [] }]));
+    },
+    lists: { someone: [5, 6, 7] },
+    async fetchUserList(name) {
+      if (!this.lists[name]) throw new Error(`No public AniList profile called “${name}” was found.`);
+      return this.lists[name];
     },
     async fetchSeason(season, year) {
       return [fakeShow(900, clock, { title: `${season} ${year}` })];
@@ -279,6 +285,27 @@ test('http api: setup, login, add, settings, feed', async (t) => {
   assert.deepEqual((await req('DELETE', '/api/shows?key=anilist:5')).body.shows, {});
   assert.ok(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')).auth.hash, 'state persisted');
 
+  // Import a profile's list, export, wipe, and restore from the export.
+  assert.equal((await req('POST', '/api/import/anilist', { username: 'x' })).status, 400);
+  assert.equal((await req('POST', '/api/import/anilist', { username: 'nobody' })).status, 502);
+  const imported = await req('POST', '/api/import/anilist', { username: 'someone' });
+  assert.deepEqual([imported.body.added, imported.body.skipped, Object.keys(imported.body.shows).length], [3, 0, 3]);
+  assert.equal((await req('POST', '/api/import/anilist', { username: 'someone' })).body.added, 0);
+  await req('POST', '/api/watched', { ids: ['anilist:6:1'] });
+  const exported = await req('GET', '/api/export');
+  assert.equal(exported.status, 200);
+  assert.equal(exported.body.shows.length, 3);
+  assert.ok(!JSON.stringify(exported.body).includes('topic-abc'), 'alert addresses are not exported');
+  for (const k of ['anilist:5', 'anilist:6', 'anilist:7']) await req('DELETE', `/api/shows?key=${k}`);
+  assert.equal((await req('POST', '/api/import', { app: 'nope' })).status, 400);
+  const restored = await req('POST', '/api/import', exported.body);
+  assert.deepEqual([restored.body.added, Object.keys(restored.body.shows).sort()], [3, ['anilist:5', 'anilist:6', 'anilist:7']]);
+  assert.equal(restored.body.shows['anilist:6'].addedAt, exported.body.shows.find((x) => x.id === 6).addedAt, 'original add time is kept');
+  for (const k of ['anilist:5', 'anilist:6', 'anilist:7']) await req('DELETE', `/api/shows?key=${k}`);
+
+  assert.match((await fetch(base + '/manifest.webmanifest')).headers.get('content-type'), /manifest\+json/);
+  assert.equal((await fetch(base + '/icon-192.png')).headers.get('content-type'), 'image/png');
+
   // Rotating the feed address kills the old one.
   const rotated = await req('POST', '/api/feed/rotate');
   assert.notEqual(rotated.body.feedToken, saved.body.feedToken);
@@ -469,4 +496,50 @@ test('reminders fire once, shortly before airing', async () => {
   clock.t += 60_000;
   await tracker.tick();
   assert.equal(sent.length, 1, 'once only');
+});
+
+test('backup leaves out secrets and survives a round trip', () => {
+  const dir = tmp();
+  const store = openStore(dir);
+  const d = store.data;
+  d.shows = { 'anilist:1': { key: 'anilist:1', source: 'anilist', id: 1, title: 'One', addedAt: 123 } };
+  d.watched = ['anilist:1:1'];
+  d.auth = hashPassword('correct horse');
+  Object.assign(d.settings, { ntfyUrl: 'https://ntfy.sh/private-topic', discordWebhook: 'https://discord.com/api/webhooks/1/abc' });
+  const backup = buildBackup(d, 0);
+  const text = JSON.stringify(backup);
+  for (const secret of [d.auth.hash, d.secret, d.feedToken, 'private-topic', 'webhooks/1/abc']) assert.ok(!text.includes(secret), `backup must not contain ${secret}`);
+  assert.deepEqual(readBackup(JSON.parse(text)).shows, [{ source: 'anilist', id: 1, addedAt: 123 }]);
+  assert.deepEqual(readBackup(JSON.parse(text)).watched, ['anilist:1:1']);
+  assert.throws(() => readBackup({ shows: [] }), /not a Show Tracker backup/);
+  assert.throws(() => readBackup(null), /not a Show Tracker backup/);
+  assert.deepEqual(readBackup({ app: 'show-tracker', shows: [{ source: 'evil', id: 1 }, { source: 'tvmaze', id: -2 }, null], watched: [1, 'ok'] }), { shows: [], watched: ['ok'], muted: [], dismissed: [], settings: {} });
+
+  for (let i = 1; i <= 16; i++) writeSnapshot(dir, d, `2026-11-${String(i).padStart(2, '0')}`);
+  const files = readdirSync(join(dir, 'backups')).sort();
+  assert.equal(files.length, 14, 'old snapshots are pruned');
+  assert.equal(files[0], 'backup-2026-11-03.json');
+});
+
+test('tick writes a daily snapshot and posts a weekly Discord backup when enabled', async () => {
+  const clock = { t: Date.UTC(2026, 10, 12, 12) };
+  const dir = tmp();
+  const store = openStore(dir);
+  const files = [];
+  const tracker = createTracker({ store, sources: fakeSources(clock), send: async () => [], sendFile: async (...a) => files.push(a), now: () => clock.t });
+  await tracker.addShow('anilist', 1);
+  await tracker.tick();
+  await tracker.tick();
+  assert.deepEqual(readdirSync(join(dir, 'backups')), ['backup-2026-11-12.json']);
+  assert.equal(files.length, 0, 'Discord backup is opt-in');
+
+  Object.assign(store.data.settings, { backupToDiscord: true, discordWebhook: 'https://discord.com/api/webhooks/1/abc' });
+  await tracker.tick();
+  await tracker.tick();
+  assert.equal(files.length, 1);
+  assert.equal(files[0][1], 'show-tracker-backup-2026-11-12.json');
+  assert.equal(JSON.parse(files[0][2]).shows.length, 1);
+  clock.t += 8 * DAY;
+  await tracker.tick();
+  assert.equal(files.length, 2, 'again a week later');
 });

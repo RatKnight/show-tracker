@@ -689,6 +689,77 @@ function viewSettings() {
     h(
       'section',
       {},
+      h('h2', {}, 'Backup and import'),
+      (() => {
+        const out = h('p', { class: 'muted small', role: 'status' });
+        const report = (r, what) => {
+          out.textContent = `${what}: ${r.added} added${r.skipped ? `, ${r.skipped} already on your list or unavailable` : ''}.`;
+        };
+        const file = h('input', {
+          type: 'file',
+          id: 'restore-file',
+          accept: 'application/json,.json',
+          onchange: async () => {
+            if (!file.files[0]) return;
+            out.textContent = 'Restoring…';
+            try {
+              report(await call('POST', '/api/import', JSON.parse(await file.files[0].text())), 'Restore finished');
+            } catch (e) {
+              out.textContent = e instanceof SyntaxError ? 'That file is not a Show Tracker backup.' : e.message;
+            }
+            file.value = '';
+          },
+        });
+        const user = h('input', { type: 'text', id: 'anilist-user', placeholder: 'AniList username', autocomplete: 'off' });
+        return h(
+          'div',
+          { class: 'card' },
+          h('p', { class: 'muted' }, 'The server keeps a snapshot of your list for each of the last 14 days. A backup file holds your shows, watched marks and preferences — not your password or alert addresses.'),
+          h('div', { class: 'actions' }, h('a', { class: 'btn', href: '/api/export', download: '' }, 'Download a backup')),
+          h('label', { class: 'field', for: 'restore-file' }, 'Restore from a backup file (adds to what is here)', file),
+          h(
+            'div',
+            { class: 'checks' },
+            h(
+              'label',
+              {},
+              h('input', {
+                type: 'checkbox',
+                checked: s.backupToDiscord,
+                disabled: !s.discordWebhook,
+                onchange: (e) => act('PUT', '/api/settings', { backupToDiscord: e.target.checked }),
+              }),
+              s.discordWebhook ? 'Also post a backup file to my Discord channel every week' : 'Add a Discord webhook above to enable weekly backups to Discord',
+            ),
+          ),
+          h('label', { class: 'field', for: 'anilist-user' }, 'Import the Watching and Planning lists of an AniList profile', user),
+          h(
+            'div',
+            { class: 'actions' },
+            h(
+              'button',
+              {
+                class: 'btn',
+                type: 'button',
+                onclick: async () => {
+                  out.textContent = 'Importing…';
+                  try {
+                    report(await call('POST', '/api/import/anilist', { username: user.value }), 'Import finished');
+                  } catch (e) {
+                    out.textContent = e.message;
+                  }
+                },
+              },
+              'Import from AniList',
+            ),
+          ),
+          out,
+        );
+      })(),
+    ),
+    h(
+      'section',
+      {},
       h('h2', {}, 'Security'),
       (() => {
         const cur = h('input', { type: 'password', id: 'pw-current', autocomplete: 'current-password', required: true });
