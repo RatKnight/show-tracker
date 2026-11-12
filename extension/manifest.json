@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Show Tracker Sync",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Marks episodes you watched on Crunchyroll and HIDIVE as watched in your own Show Tracker, and suggests shows from your history and watchlist.",
   "browser_specific_settings": {
     "gecko": {

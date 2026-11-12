@@ -60,11 +60,7 @@ a { color: inherit; }
 .brand:hover .name { text-decoration: underline; }
 .brand:focus-visible { outline: 2px solid var(--accent); }
 .brand .name { font-size: 18px; font-weight: 700; }
-.logo {
-  display: grid; place-items: center;
-  width: 30px; height: 30px; border-radius: 8px;
-  background: var(--accent); color: var(--accent-ink); font-size: 13px;
-}
+.logo { width: 30px; height: 30px; display: block; }
 .search { position: relative; display: flex; flex: 1 1 320px; max-width: 640px; }
 .search select, .search input {
   font: inherit; color: var(--text);
