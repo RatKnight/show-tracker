@@ -205,6 +205,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     },
     mail: mailer.enabled,
     movies: movies(),
+    dubs: Boolean(sources.hasDubs?.()),
     shows: Object.fromEntries(tracker.showsOf(u).map((s) => [s.key, s])),
     alerts: u.alerts,
     settings: u.settings,
@@ -597,6 +598,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         const next = {
           services: Array.isArray(body.services) ? body.services.filter((s) => Object.hasOwn(SERVICES, s)) : cur.services,
           region: typeof body.region === 'string' && /^[A-Z]{2}$/.test(body.region) ? body.region : cur.region,
+          audio: ['sub', 'dub', 'both'].includes(body.audio) ? body.audio : cur.audio,
           ntfyUrl: typeof body.ntfyUrl === 'string' ? body.ntfyUrl.trim() : cur.ntfyUrl,
           discordWebhook: typeof body.discordWebhook === 'string' ? body.discordWebhook.trim() : cur.discordWebhook,
           alertMode: ['instant', 'digest'].includes(body.alertMode) ? body.alertMode : cur.alertMode,
@@ -937,6 +939,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const mailer = createMailer({ apiKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM, publicUrl: process.env.PUBLIC_URL });
   const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer, publicUrl: process.env.PUBLIC_URL });
   console.log(process.env.TMDB_API_KEY ? 'Movies are on.' : 'Movies are off (needs TMDB_API_KEY).');
+  console.log(process.env.ANIMESCHEDULE_TOKEN ? 'Dub dates are on.' : 'Dub dates are off (needs ANIMESCHEDULE_TOKEN).');
   console.log(mailer.enabled ? 'E-mail recovery is on.' : 'E-mail recovery is off (needs RESEND_API_KEY, MAIL_FROM and PUBLIC_URL).');
   console.log(store.encrypted ? 'Data is encrypted at rest.' : 'WARNING: DATA_KEY is not set, so data is stored unencrypted.');
   if (setupCode) console.log(`No account exists yet. Setup code for the first visit: ${setupCode}`);

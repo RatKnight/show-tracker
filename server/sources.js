@@ -303,3 +303,42 @@ export async function fetchPremieres(region, now = Date.now()) {
   }
   return [...seen.values()].sort((a, b) => a.episodes[0].airsAt - b.episodes[0].airsAt);
 }
+
+// ---------------------------------------------------------------- English dubs (AnimeSchedule)
+//
+// Needs an AnimeSchedule API token in ANIMESCHEDULE_TOKEN. Without one, dub
+// dates are simply not offered.
+
+export const hasDubs = () => Boolean(process.env.ANIMESCHEDULE_TOKEN);
+
+/** ISO week number and week-year of a timestamp (what the timetable is keyed by). */
+export function isoWeek(ts) {
+  const d = new Date(ts);
+  const day = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  day.setUTCDate(day.getUTCDate() + 4 - (day.getUTCDay() || 7)); // the Thursday of this week
+  const yearStart = Date.UTC(day.getUTCFullYear(), 0, 1);
+  return { week: Math.ceil(((day - yearStart) / DAY + 1) / 7), year: day.getUTCFullYear() };
+}
+
+/**
+ * English dub episodes from last week through two weeks ahead:
+ * [{ names: [titles], episode, airsAt }].
+ */
+export async function fetchDubs(now = Date.now()) {
+  const out = [];
+  for (const offset of [-1, 0, 1, 2]) {
+    const { week, year } = isoWeek(now + offset * 7 * DAY);
+    const res = await fetch(`https://animeschedule.net/api/v3/timetables/dub?week=${week}&year=${year}&tz=UTC`, {
+      headers: { Authorization: `Bearer ${process.env.ANIMESCHEDULE_TOKEN}`, Accept: 'application/json', 'User-Agent': 'show-tracker' },
+      signal: AbortSignal.timeout(25000),
+    });
+    if (res.status === 401) throw new Error('AnimeSchedule rejected the API token.');
+    if (!res.ok) throw new Error(`AnimeSchedule request failed (${res.status})`);
+    for (const e of await res.json()) {
+      const airsAt = Date.parse(e.episodeDate);
+      if (!Number.isInteger(e.episodeNumber) || e.episodeNumber < 1 || !Number.isFinite(airsAt)) continue;
+      out.push({ names: [e.english, e.title, e.romaji].filter(Boolean), episode: e.episodeNumber, airsAt });
+    }
+  }
+  return out;
+}

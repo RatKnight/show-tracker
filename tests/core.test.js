@@ -239,6 +239,10 @@ test('watchState: how far behind, what is next, and progress markers', () => {
   // Watched up to 5, plus episode 7 on its own: 6 and 8 remain.
   assert.deepEqual(watchState(airing, new Set([`${k}:7`]), 5, NOW), { behind: 2, next: { id: `${k}:6`, label: 'Episode 6' }, started: true });
   assert.deepEqual(watchState(airing, new Set(), 8, NOW), { behind: 0, next: null, started: true });
+  // A dubbed episode is watched when its episode is, by single mark or by progress.
+  assert.ok(isWatched(airing, { id: `${k}:dub:6`, dub: true }, new Set([`${k}:6`]), 0));
+  assert.ok(isWatched(airing, { id: `${k}:dub:3`, dub: true }, new Set(), 5));
+  assert.ok(!isWatched(airing, { id: `${k}:dub:7`, dub: true }, new Set([`${k}:6`]), 5));
   assert.ok(isWatched(airing, { id: `${k}:3` }, new Set(), 5) && !isWatched(airing, { id: `${k}:6` }, new Set(), 5) && isWatched(airing, { id: `${k}:6` }, new Set([`${k}:6`]), 5));
 
   // Finished: all episodes are out. Not yet released: none. Unknown progress: no claim.
