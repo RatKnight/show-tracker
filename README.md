@@ -21,6 +21,9 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
   and track films; their US cinema and digital release dates appear on the calendar
   with an alert on the day. *Discover → In cinemas* lists anime films with a US
   cinema date, and you are told when a new one is announced.
+- **English dubs** (optional, needs a free [AnimeSchedule](https://animeschedule.net)
+  token) – dub release dates for tracked anime; each person chooses to follow the
+  subtitled release, the dub, or both.
 - **Series** – anime seasons are separate entries at the source; seasons of the same
   show are folded into one entry on *My shows* and *Watch next* and grouped in
   search results, and new seasons of anime you track
@@ -81,6 +84,7 @@ Environment variables:
 | `PUBLIC_URL` | The site's public `https://` address. Passkeys are bound to it, and links in e-mails point to it. |
 | `RESEND_API_KEY`, `MAIL_FROM` | Optional e-mail password recovery through [Resend](https://resend.com). Needs `PUBLIC_URL` too. An API key with sending access, and a sender on a verified domain (e.g. `Show Tracker <noreply@example.com>`). |
 | `TMDB_API_KEY` | Optional. A TMDB “API Read Access Token”; switches on movie search, US release dates and the cinema list. |
+| `ANIMESCHEDULE_TOKEN` | Optional. An AnimeSchedule API token; switches on English dub release dates. |
 | `RECOVER_ADMIN` | Set to `yes` for one start to remove the admin's passkeys and print an admin password-reset link in the log. |
 | `PORT`, `DATA_DIR` | Default `3000` and `/data`. |
 

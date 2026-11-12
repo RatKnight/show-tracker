@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], progress: {}, muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [] }, mail: false, movies: false };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], progress: {}, muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [] }, mail: false, movies: false, dubs: false };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -199,7 +199,7 @@ function episodeRow({ show, ep }, { showDate = false, unread = false, watch = fa
             type: 'button',
             'aria-pressed': String(seen),
             title: seen ? 'Mark as not watched' : 'Mark as watched',
-            onclick: () => act('POST', '/api/watched', { ids: [ep.id], watched: !seen }),
+            onclick: () => act('POST', '/api/watched', { ids: [ep.watchId || ep.id], watched: !seen }),
           },
           seen ? '✓ Watched' : 'Mark watched',
         ),
@@ -248,7 +248,7 @@ function viewUpcoming() {
         'div',
         { class: 'section-head' },
         h('h2', {}, toWatch.length ? `Aired recently · ${toWatch.length} to watch` : 'Aired recently'),
-        toWatch.length > 1 && h('button', { class: 'btn', type: 'button', onclick: () => act('POST', '/api/watched', { ids: toWatch.map((x) => x.ep.id) }) }, 'Mark all watched'),
+        toWatch.length > 1 && h('button', { class: 'btn', type: 'button', onclick: () => act('POST', '/api/watched', { ids: [...new Set(toWatch.map((x) => x.ep.watchId || x.ep.id))] }) }, 'Mark all watched'),
       ),
       h('div', { class: 'list' }, recent.map((i) => episodeRow(i, { showDate: true, watch: true, unread: toWatch.includes(i) }))),
     );
@@ -886,6 +886,22 @@ function viewSettings() {
           h('label', {}, h('input', { type: 'checkbox', checked: s.autoTrackSeasons, onchange: (e) => act('PUT', '/api/settings', { autoTrackSeasons: e.target.checked }) }), 'Track new seasons of my anime automatically when they are announced'),
         ),
         h('p', { class: 'muted small' }, 'A season you remove yourself is not added back.'),
+        state.dubs &&
+          h(
+            'label',
+            { class: 'field', for: 'audio' },
+            'For anime, follow',
+            h(
+              'select',
+              { id: 'audio', onchange: (e) => act('PUT', '/api/settings', { audio: e.target.value }) },
+              [
+                ['sub', 'Subtitled releases (the Japanese broadcast)'],
+                ['dub', 'English dub releases'],
+                ['both', 'Both subtitled and dubbed'],
+              ].map(([value, label]) => h('option', { value, selected: (s.audio || 'sub') === value }, label)),
+            ),
+          ),
+        state.dubs && h('p', { class: 'muted small' }, 'Dub dates come from AnimeSchedule and cover roughly the last week and the next two. A show with no dub listed keeps showing its subtitled episodes.'),
         state.movies &&
           h(
             'div',
@@ -1079,7 +1095,7 @@ function viewSettings() {
       h(
         'div',
         { class: 'card' },
-        h('p', { class: 'muted' }, 'Anime schedules come from AniList and TV schedules from TVmaze. Films and country-specific streaming availability come from TMDB, with availability supplied by JustWatch. Anime times are the Japanese broadcast time; the episode usually reaches Crunchyroll or HIDIVE within an hour or so, but some simulcasts are delayed. Where a show has not been looked up yet, its streaming tags are not tied to a country.'),
+        h('p', { class: 'muted' }, 'Anime schedules come from AniList, English dub dates from AnimeSchedule, and TV schedules from TVmaze. Films and country-specific streaming availability come from TMDB, with availability supplied by JustWatch. Anime times are the Japanese broadcast time; the episode usually reaches Crunchyroll or HIDIVE within an hour or so, but some simulcasts are delayed. Where a show has not been looked up yet, its streaming tags are not tied to a country.'),
       ),
     ),
   ];

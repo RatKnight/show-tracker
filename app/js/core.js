@@ -134,7 +134,10 @@ function latestAired(media, schedule, now) {
 /** Has this episode been watched? `watched` is a Set of ids, `through` the "watched up to" number for the show. */
 export function isWatched(show, ep, watched, through = 0) {
   if (watched.has(ep.id)) return true;
-  const n = show.source === 'anilist' ? Number(ep.id.slice(show.key.length + 1)) : NaN;
+  // A dubbed episode is the same episode: "anilist:5:dub:3" counts as "anilist:5:3".
+  const tail = ep.id.slice(show.key.length + 1).replace(/^dub:/, '');
+  if (ep.dub && watched.has(`${show.key}:${tail}`)) return true;
+  const n = show.source === 'anilist' ? Number(tail) : NaN;
   return Number.isInteger(n) && n <= through;
 }
 

@@ -3,7 +3,7 @@
 // Schedules live once in a shared catalog; each user holds only the keys of the
 // shows they track plus their own alerts, watched marks and settings. Every
 // function that touches personal data takes the user it acts for.
-import { collectAlerts, myStreams, serviceId } from '../app/js/core.js';
+import { collectAlerts, myStreams, serviceId, PAST_WINDOW } from '../app/js/core.js';
 import { computeDiscover, buildSeries, withFranchiseRoots } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
 import { readFileSync } from 'node:fs';
@@ -27,6 +27,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
   // Anime films heading for US cinemas, shared by everyone: { list, updatedAt }.
   let cinema = { list: [], updatedAt: 0 };
   let cinemaAttempt = 0;
+  let dubAttempt = 0;
 
   // Bundles and ad tiers of a service the list already names.
   const NOT_A_SERVICE = /Amazon Channel|Apple TV Channel|Roku Premium Channel|with Ads/i;
@@ -49,11 +50,52 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     return streams.length ? { ...show, streams, streamsRegion: region } : show;
   }
 
+  /**
+   * Apply a user's choice of subtitled or dubbed releases to an anime's episodes.
+   * A show with no dub schedule keeps its subtitled episodes whatever the choice,
+   * so it never drops off the lists.
+   */
+  function withAudio(show, audio) {
+    const dubbed = data.dubs[show.key];
+    if (!dubbed?.length || !audio || audio === 'sub') return show;
+    const episodes = audio === 'dub' ? dubbed : [...show.episodes, ...dubbed].sort((a, b) => a.airsAt - b.airsAt);
+    return { ...show, episodes, audio };
+  }
+
+  /**
+   * Refresh English dub dates and attach them to the tracked anime they belong
+   * to, matching on title. Dub episodes already known are kept for a month,
+   * since the source only lists a few weeks at a time.
+   */
+  async function refreshDubs() {
+    if (!sources.hasDubs?.()) return 0;
+    const listed = await sources.fetchDubs(now());
+    data.dubsAt = now();
+    const byName = new Map();
+    for (const entry of listed) for (const name of entry.names) byName.set(normTitle(name), [...(byName.get(normTitle(name)) || []), entry]);
+    let matched = 0;
+    for (const show of Object.values(data.catalog)) {
+      if (show.source !== 'anilist') continue;
+      // Exact title match only: a dub of "Season 2" must not land on season 1.
+      const entries = [show.title, show.altTitle].map((t) => byName.get(normTitle(t))).find((x) => x?.length) || [];
+      const known = new Map((data.dubs[show.key] || []).filter((e) => e.airsAt >= now() - PAST_WINDOW).map((e) => [e.id, e]));
+      for (const e of entries) {
+        const id = `${show.key}:dub:${e.episode}`;
+        known.set(id, { id, label: `Episode ${e.episode} (dub)`, airsAt: e.airsAt, dub: true, watchId: `${show.key}:${e.episode}` });
+      }
+      if (entries.length) matched++;
+      if (known.size) data.dubs[show.key] = [...known.values()].sort((a, b) => a.airsAt - b.airsAt);
+      else delete data.dubs[show.key];
+    }
+    store.save();
+    return matched;
+  }
+
   /** A user's tracked shows: catalog entries stamped with when they added them. */
   const showsOf = (u) =>
     Object.entries(u.shows)
       .filter(([key]) => data.catalog[key])
-      .map(([key, { addedAt }]) => ({ ...localStreams(data.catalog[key], u.settings.region || 'US'), addedAt }));
+      .map(([key, { addedAt }]) => ({ ...withAudio(localStreams(data.catalog[key], u.settings.region || 'US'), u.settings.audio), addedAt }));
 
   /** Which of a user's tracked anime are seasons of the same series. */
   const seriesOf = (u) => withFranchiseRoots(u.discover?.series || {}, showsOf(u), data.franchise);
@@ -96,6 +138,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     for (const key of Object.keys(data.catalog)) if (!wanted.has(key)) delete data.catalog[key];
     for (const key of Object.keys(data.franchise)) if (!wanted.has(key)) delete data.franchise[key];
     for (const key of Object.keys(data.availability)) if (!wanted.has(key)) delete data.availability[key];
+    for (const key of Object.keys(data.dubs)) if (!wanted.has(key)) delete data.dubs[key];
   }
 
   /**
@@ -453,6 +496,9 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     const now_ = new Set(missing.map(keyOf).filter((k) => u.shows[k]));
     if (discover) u.dismissed = u.dismissed.filter((k) => !now_.has(k));
     if (added) {
+      // Newly tracked anime get their dub dates at the next pass, not after the retry delay.
+      data.dubsAt = 0;
+      dubAttempt = 0;
       store.save();
       if (discover) discoverSoon(u);
     }
@@ -567,6 +613,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
 
   return {
     showsOf,
+    refreshDubs,
     seriesOf,
     fillAvailability,
     emailBackup,
@@ -646,6 +693,12 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       }
       await fillFranchises().catch((e) => console.error('Franchise lookup failed:', e.message));
       await fillAvailability().catch((e) => console.error('Availability lookup failed:', e.message));
+      // Dub dates: every six hours, retrying hourly on failure.
+      if (sources.hasDubs?.() && now() - data.dubsAt > 6 * 60 * 60 * 1000 && now() - dubAttempt > 60 * 60 * 1000) {
+        dubAttempt = now();
+        await refreshDubs().catch((e) => console.error('Dub schedule refresh failed:', e.message));
+        for (const u of users()) await checkAlerts(u);
+      }
       await emailBackup().catch((e) => console.error('Backup e-mail failed:', e.message));
       await checkHealth().catch((e) => console.error('Health check failed:', e.message));
       await runBackups().catch((e) => console.error('Backup failed:', e.message));

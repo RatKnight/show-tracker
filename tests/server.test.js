@@ -101,6 +101,14 @@ function fakeSources(clock) {
     async fetchPremieres(region) {
       return [fakeShow(800, clock, { key: 'tvmaze:800', source: 'tvmaze', title: `Premiere in ${region}`, premiere: 'New series' })];
     },
+    dubbed: true,
+    hasDubs() {
+      return this.dubbed;
+    },
+    dubList: [],
+    async fetchDubs() {
+      return this.dubList;
+    },
     cinemaList: [],
     async fetchCinemaAnime() {
       return this.cinemaList;
@@ -1357,4 +1365,74 @@ test('http: region setting and premieres', async (t) => {
   assert.equal((await ann.req('PUT', '/api/settings', { region: 'GB' })).body.settings.region, 'GB');
   const p = (await ann.req('GET', '/api/premieres')).body;
   assert.deepEqual([p.region, p.list[0].title, p.list[0].premiere], ['GB', 'Premiere in GB', 'New series']);
+});
+
+test('English dubs: attached by exact title, chosen per user, alerted, and sharing the watched mark', async () => {
+  const { clock, sent, store, sources, user, tracker, start } = rig();
+  sources.fetchAnime = async (ids) => ids.map((id) => fakeShow(id, { t: start }, { title: id === 6 ? 'Show 5 Season 2' : `Show ${id}` }));
+  const bob = makeUser({ username: 'bob' });
+  store.data.users[bob.id] = bob;
+  await tracker.addShow(user, 'anilist', 5);
+  await tracker.addShow(user, 'anilist', 6);
+  await tracker.addShow(bob, 'anilist', 5);
+  user.settings.audio = 'dub';
+
+  sources.dubList = [
+    { names: ['Show 5', 'Shou Go'], episode: 3, airsAt: start + 60_000 },
+    { names: ['SHOW 5!'], episode: 2, airsAt: start - 6 * DAY },
+    { names: ['Unrelated'], episode: 1, airsAt: start },
+  ];
+  assert.equal(await tracker.refreshDubs(), 1, 'one tracked show has a dub; "Show 5 Season 2" is not confused with it');
+  const five = tracker.showsOf(user).find((x) => x.key === 'anilist:5');
+  assert.deepEqual(five.episodes.map((e) => [e.id, e.label, e.watchId]), [
+    ['anilist:5:dub:2', 'Episode 2 (dub)', 'anilist:5:2'],
+    ['anilist:5:dub:3', 'Episode 3 (dub)', 'anilist:5:3'],
+  ]);
+  assert.deepEqual(tracker.showsOf(user).find((x) => x.key === 'anilist:6').episodes.map((e) => e.label), ['Episode 1', 'Episode 2'], 'no dub listed: subtitled episodes stay');
+  assert.deepEqual(tracker.showsOf(bob)[0].episodes.map((e) => e.label), ['Episode 1', 'Episode 2'], 'another user still follows the subtitled release');
+
+  user.settings.audio = 'both';
+  assert.deepEqual(tracker.showsOf(user).find((x) => x.key === 'anilist:5').episodes.map((e) => e.label), ['Episode 2 (dub)', 'Episode 1', 'Episode 2', 'Episode 3 (dub)']);
+
+  // The dub airing raises its own alert, for the user who follows dubs only.
+  clock.t = start + 2 * 60_000;
+  await tracker.checkAlerts(user);
+  await tracker.checkAlerts(bob);
+  const bodies = sent.flat().map((m) => m.body);
+  assert.ok(bodies.includes('Episode 3 (dub) is out on Crunchyroll'));
+  assert.equal(bodies.filter((b) => b.includes('(dub)')).length, 1);
+
+  // A show added later picks its dub dates up at the next minute's pass, not after the hourly retry delay.
+  sources.dubList = [...sources.dubList, { names: ['Show 9'], episode: 1, airsAt: clock.t + DAY }];
+  await tracker.tick();
+  await tracker.addShow(bob, 'anilist', 9);
+  await tracker.tick();
+  assert.equal(store.data.dubs['anilist:9']?.length, 1);
+  delete store.data.dubs['anilist:9'];
+  tracker.removeShow(bob, 'anilist:9');
+
+  // Older dub episodes are kept between refreshes, then dropped after a month.
+  sources.dubList = [];
+  await tracker.refreshDubs();
+  assert.equal(store.data.dubs['anilist:5'].length, 2);
+  clock.t = start + 40 * DAY;
+  await tracker.refreshDubs();
+  assert.equal(store.data.dubs['anilist:5'], undefined);
+});
+
+test('http: audio setting; a watched mark covers both the subtitled and the dubbed episode', async (t) => {
+  const { setupCode, sources, tracker, client } = await serve(t);
+  const ann = client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  let st = (await ann.req('GET', '/api/state')).body;
+  assert.deepEqual([st.dubs, st.settings.audio], [true, 'sub']);
+  assert.equal((await ann.req('PUT', '/api/settings', { audio: 'klingon' })).body.settings.audio, 'sub');
+  await ann.req('POST', '/api/shows', { source: 'anilist', id: 5 });
+  sources.dubList = [{ names: ['Show 5'], episode: 1, airsAt: Date.now() - DAY }];
+  await tracker.refreshDubs();
+  st = (await ann.req('PUT', '/api/settings', { audio: 'both' })).body;
+  const eps = st.shows['anilist:5'].episodes;
+  assert.ok(eps.some((e) => e.id === 'anilist:5:dub:1' && e.dub && e.watchId === 'anilist:5:1'));
+  sources.dubbed = false;
+  assert.equal((await ann.req('GET', '/api/state')).body.dubs, false);
 });
