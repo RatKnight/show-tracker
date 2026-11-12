@@ -298,3 +298,26 @@ details > summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
 details[open] > summary { margin-bottom: 10px; }
 .results .row.nested { margin-left: 0; padding-left: 40px; background: var(--panel-2); }
 .results .row.nested .thumb { width: 28px; height: 40px; }
+
+/* ---------- account menu ---------- */
+.menu-wrap { position: relative; }
+.menu {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 20; min-width: 190px; padding: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px rgb(0 0 0 / .35);
+}
+.menu-who { padding: 6px 10px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.menu button {
+  display: block; width: 100%; text-align: left; font: inherit; color: var(--text); cursor: pointer;
+  background: none; border: 0; border-radius: 6px; padding: 8px 10px;
+}
+.menu button:hover, .menu button:focus-visible { background: var(--panel-2); outline: none; }
+
+/* ---------- saved note ---------- */
+.toast {
+  position: fixed; right: 20px; bottom: 20px; z-index: 30; padding: 10px 16px; border-radius: 8px;
+  background: var(--good); color: #fff; font-weight: 600; box-shadow: 0 8px 24px rgb(0 0 0 / .35);
+  opacity: 0; transform: translateY(6px); transition: opacity .15s, transform .15s;
+}
+.toast.show { opacity: 1; transform: none; }
+.signed-out .menu-wrap { display: none; }
+@media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
