@@ -31,6 +31,8 @@ export function makeUser(fields) {
     createdAt: Date.now(),
     feedToken: token(),
     shareToken: null,
+    email: '', // confirmed address for password recovery, optional
+    pendingEmail: null, // { address, hash, expiresAt } until its link is clicked
     shows: {}, // show key -> { addedAt }; the show itself lives in the shared catalog
     alerts: [],
     alerted: [],

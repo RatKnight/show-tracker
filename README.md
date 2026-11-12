@@ -58,6 +58,7 @@ Environment variables:
 | Variable | Purpose |
 |---|---|
 | `DATA_KEY` | Encrypts the data file at rest (AES-256-GCM). At least 32 characters. **Keep a copy somewhere safe: without it the data cannot be read.** If unset, data is stored unencrypted and the admin sees a warning. |
+| `RESEND_API_KEY`, `MAIL_FROM`, `PUBLIC_URL` | Optional e-mail password recovery through [Resend](https://resend.com). Needs all three: an API key with sending access, a sender on a verified domain (e.g. `Show Tracker <noreply@example.com>`), and the site's public `https://` address, which is what links in e-mails point to. |
 | `RECOVER_ADMIN` | Set to `yes` for one start to print an admin password-reset link in the log. |
 | `PORT`, `DATA_DIR` | Default `3000` and `/data`. |
 
@@ -74,8 +75,10 @@ yet. Setup code for the first visit: …`), so nobody else can claim a fresh ins
 - This protects stored data. It does not hide data from someone who controls the
   running server, because the server must read lists to check schedules and send
   alerts.
-- Forgotten passwords are reset with a one-time link created by an admin
-  (*Settings → People*). There is no e-mail on file.
+- Forgotten passwords are reset with a one-time link: created by an admin
+  (*Settings → People*), or, when e-mail is configured, sent to the address a
+  person has added and confirmed. Addresses are optional, used for nothing else,
+  encrypted with the rest of the data, and not visible to other users or admins.
 
 ### Locally
 
