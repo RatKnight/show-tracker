@@ -74,3 +74,8 @@ npm test
 - `server.js` – HTTP server, login and API routes.
 - `server/` – storage, schedule sources, background tracker, alert delivery and the
   calendar feed.
+
+## License
+
+All rights reserved – see [LICENSE](LICENSE). The code is public for viewing only
+and may not be reused without permission.
