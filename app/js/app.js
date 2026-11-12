@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], me: { username: '', admin: false } };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], me: { username: '', admin: false, email: '', pendingEmail: null }, mail: false };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -20,6 +20,8 @@ const ui = {
   link: null, // { kind: 'invite' | 'reset' | 'share', token, ... } from the page address
   admin: null, // { users, pendingInvites, encrypted }
   shared: null, // someone else's shared list
+  forgot: false, // showing the forgot-password form
+  info: null, // one-off good news shown above the page
 };
 
 const shows = () => Object.values(state.shows);
@@ -778,6 +780,38 @@ function viewSettings() {
             h('button', { class: 'btn', type: 'button', onclick: () => call('PUT', '/api/account', { username: name.value }).then(() => (out.textContent = 'Username saved.'), (e) => (out.textContent = e.message)) }, 'Save username'),
           ),
           out,
+          state.mail &&
+            (() => {
+              const mailOut = h('p', { class: 'muted small', role: 'status' });
+              const email = h('input', { type: 'email', id: 'account-email', value: state.me.pendingEmail || state.me.email, autocomplete: 'email', placeholder: 'you@example.com' });
+              const save = (value) =>
+                call('PUT', '/api/account/email', { email: value }).then(
+                  () => {
+                    ui.notice = null;
+                    render();
+                  },
+                  (e) => (mailOut.textContent = e.message),
+                );
+              return [
+                h('label', { class: 'field', for: 'account-email' }, 'E-mail for password recovery (optional)', email),
+                h(
+                  'p',
+                  { class: 'muted small' },
+                  state.me.pendingEmail
+                    ? `A confirmation link was sent to ${state.me.pendingEmail}. Open it within 24 hours to finish.${state.me.email ? ` Until then ${state.me.email} stays in use.` : ''}`
+                    : state.me.email
+                      ? `${state.me.email} is confirmed. Used only to send you a password-reset link; nobody else on this site can see it.`
+                      : 'Used only to send you a password-reset link. Nobody else on this site can see it, and without one you can still ask for a reset link.',
+                ),
+                h(
+                  'div',
+                  { class: 'actions' },
+                  h('button', { class: 'btn', type: 'button', onclick: () => save(email.value) }, state.me.pendingEmail ? 'Send the link again' : 'Save e-mail'),
+                  (state.me.email || state.me.pendingEmail) && h('button', { class: 'btn quiet', type: 'button', onclick: () => save('') }, 'Remove e-mail'),
+                ),
+                mailOut,
+              ];
+            })(),
           h('p', { class: 'muted' }, 'Your list is private. Nobody else on this site can see it — unless you switch on a share link, which lets anyone holding the link see your shows and their schedule (not your watched marks, alerts or settings).'),
           h(
             'div',
@@ -807,6 +841,7 @@ function viewSettings() {
             'div',
             { class: 'card' },
             h('p', { class: a.encrypted ? 'muted' : 'error' }, a.encrypted ? 'Data is encrypted at rest.' : 'Data is NOT encrypted at rest: no DATA_KEY is set on the server.'),
+            h('p', { class: 'muted' }, a.mail ? 'E-mail recovery is on: people can add an address and reset their own password.' : 'E-mail recovery is off (the mail settings are missing on the server). You can still hand out reset links below.'),
             h('p', { class: 'muted' }, 'You can see who has an account, but not what is on their lists. New people join through a one-time invite link.'),
             h(
               'div',
@@ -947,7 +982,42 @@ function dropLink() {
   history.replaceState(null, '', location.pathname);
 }
 
+function viewForgot() {
+  const who = h('input', { type: 'text', id: 'forgot-id', autocomplete: 'username', autocapitalize: 'none', required: true });
+  const msg = h('p', { class: 'small', role: 'status' });
+  const back = () => {
+    ui.forgot = false;
+    render();
+  };
+  const form = h(
+    'form',
+    {
+      class: 'card auth',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          await call('POST', '/api/forgot', { identifier: who.value });
+          msg.className = 'small';
+          msg.textContent = 'If that account has a confirmed e-mail address, a reset link is on its way. It works for 30 minutes.';
+        } catch (err) {
+          msg.className = 'error small';
+          msg.textContent = err.message;
+        }
+      },
+    },
+    h('h3', {}, 'Reset your password'),
+    h('p', { class: 'muted' }, 'Enter your username or the e-mail address on your account. No address on file? Ask the person who runs this site for a reset link instead.'),
+    h('label', { class: 'field', for: 'forgot-id' }, 'Username or e-mail', who),
+    h('button', { class: 'btn primary', type: 'submit' }, 'Send reset link'),
+    h('button', { class: 'btn quiet', type: 'button', onclick: back }, 'Back to sign in'),
+    msg,
+  );
+  setTimeout(() => who.focus());
+  return form;
+}
+
 function viewAuth() {
+  if (ui.forgot && !ui.link) return viewForgot();
   const link = ui.link;
   // Which of the four forms this is.
   const mode = link?.kind === 'invite' ? 'invite' : link?.kind === 'reset' ? 'reset' : !ui.session.setup ? 'setup' : 'login';
@@ -994,7 +1064,21 @@ function viewAuth() {
     mode !== 'reset' && h('label', { class: 'field', for: 'username' }, 'Username', name),
     h('label', { class: 'field', for: 'password' }, creating ? 'New password' : 'Password', pw),
     h('button', { class: 'btn primary', type: 'submit' }, { setup: 'Create admin account', login: 'Sign in', invite: 'Create account', reset: 'Save new password' }[mode]),
-    mode === 'login' && h('p', { class: 'muted small' }, 'Forgot your password? Ask the person who runs this site for a reset link.'),
+    mode === 'login' &&
+      (ui.session.mail
+        ? h(
+            'button',
+            {
+              class: 'btn quiet',
+              type: 'button',
+              onclick: () => {
+                ui.forgot = true;
+                render();
+              },
+            },
+            'Forgot your password?',
+          )
+        : h('p', { class: 'muted small' }, 'Forgot your password? Ask the person who runs this site for a reset link.')),
     msg,
   );
   setTimeout(() => (mode === 'setup' ? code : mode === 'reset' ? pw : name).focus());
@@ -1047,8 +1131,9 @@ function render() {
   }
   if (!authed || ui.link) {
     document.body.classList.add('signed-out');
-    $('banner').hidden = !ui.error;
-    $('banner').textContent = ui.error || '';
+    $('banner').hidden = !ui.error && !ui.info;
+    $('banner').classList.toggle('good', !ui.error && Boolean(ui.info));
+    $('banner').textContent = ui.error || ui.info || '';
     $('view').replaceChildren(...(ui.session ? [viewAuth()] : [empty('Loading…', '')]));
     return;
   }
@@ -1071,8 +1156,9 @@ function render() {
   );
 
   const problem = ui.error || state.lastError;
-  $('banner').hidden = !problem;
-  $('banner').textContent = problem || '';
+  $('banner').hidden = !problem && !ui.info;
+  $('banner').classList.toggle('good', !problem && Boolean(ui.info));
+  $('banner').textContent = problem || ui.info || '';
 
   $('refresh-btn').disabled = ui.refreshing || !shows().length;
   $('refresh-btn').textContent = ui.refreshing ? 'Refreshing…' : 'Refresh';
@@ -1092,6 +1178,7 @@ function setTab(id) {
   }
   ui.tab = id;
   ui.notice = null;
+  ui.info = null;
   render();
 }
 
@@ -1202,7 +1289,7 @@ async function adoptTimeZone() {
 
 async function boot() {
   render();
-  const hash = /^#(invite|reset|share)=([\w-]{8,})$/.exec(location.hash);
+  const hash = /^#(invite|reset|share|confirm)=([\w-]{8,})$/.exec(location.hash);
   try {
     if (hash?.[1] === 'share') {
       ui.shared = await call('GET', `/api/shared?token=${hash[2]}`);
@@ -1210,7 +1297,12 @@ async function boot() {
       return render();
     }
     ui.session = await call('GET', '/api/session');
-    if (hash) {
+    if (hash?.[1] === 'confirm') {
+      history.replaceState(null, '', location.pathname);
+      const done = await call('POST', '/api/email/confirm', { token: hash[2] });
+      ui.info = `${done.email} is confirmed. You can now use it to reset your password.`;
+      if (ui.session.authed) await call('GET', '/api/state');
+    } else if (hash) {
       const info = await call('GET', `/api/link?kind=${hash[1]}&token=${hash[2]}`);
       ui.link = { ...info, token: hash[2] };
     } else if (ui.session.authed) {
@@ -1225,6 +1317,11 @@ async function boot() {
   render();
 }
 boot();
+// A one-time link opened in a tab where the app is already running only changes
+// the part after "#", which does not reload the page by itself.
+window.addEventListener('hashchange', () => {
+  if (/^#(invite|reset|share|confirm)=/.test(location.hash)) location.reload();
+});
 
 // Every minute: pick up new alerts and schedule changes from the server and keep
 // countdowns fresh. Skipped on Settings so typing is never interrupted.

@@ -13,6 +13,7 @@ import { sendAlerts, sendDiscordFile, validateChannels } from './server/notify.j
 import { buildBackup, readBackup } from './server/backup.js';
 import { buildIcs } from './server/ics.js';
 import { validTimeZone } from './server/timing.js';
+import { createMailer, cleanEmail } from './server/mail.js';
 import * as liveSources from './server/sources.js';
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), 'app');
@@ -61,7 +62,7 @@ async function readJson(req, limit = 64 * 1024) {
   throw new HttpError(400, 'Invalid JSON.');
 }
 
-export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, now = Date.now } = {}) {
+export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, mailer = createMailer(), now = Date.now } = {}) {
   const store = openStore(dataDir, { dataKey });
   const { data } = store;
   const tracker = createTracker({ store, sources, send, sendFile, now });
@@ -95,6 +96,17 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     if (failures.size > 5000) failures.clear();
   };
 
+  // Mail sent per target (address or account), so nobody's inbox can be flooded.
+  const mailLog = new Map();
+  const mayMail = (key, max = 3) => {
+    const list = (mailLog.get(key) || []).filter((t) => t > now() - 60 * 60 * 1000);
+    if (list.length >= max) return false;
+    mailLog.set(key, [...list, now()]);
+    if (mailLog.size > 5000) mailLog.clear();
+    return true;
+  };
+  const sendMail = (message) => mailer.send(message).catch((e) => console.error('Mail failed:', e.message));
+
   const DAY_MS = 24 * 60 * 60 * 1000;
   const users = () => Object.values(data.users);
   const findUser = (name) => users().find((u) => u.username.toLowerCase() === String(name).toLowerCase()) || null;
@@ -115,7 +127,8 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
   /** Everything the signed-in user's own browser may see. Never another user's data. */
   const publicState = (u) => ({
-    me: { id: u.id, username: u.username, admin: u.admin },
+    me: { id: u.id, username: u.username, admin: u.admin, email: u.email, pendingEmail: u.pendingEmail?.expiresAt > now() ? u.pendingEmail.address : null },
+    mail: mailer.enabled,
     shows: Object.fromEntries(tracker.showsOf(u).map((s) => [s.key, s])),
     alerts: u.alerts,
     settings: u.settings,
@@ -140,6 +153,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
   /** What an admin may know about the accounts: names and dates, never lists. */
   const adminView = () => ({
     encrypted: store.encrypted,
+    mail: mailer.enabled,
     users: users()
       .map((x) => ({ id: x.id, username: x.username, admin: x.admin, createdAt: x.createdAt }))
       .sort((a, b) => a.createdAt - b.createdAt),
@@ -166,7 +180,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     // ---------------------------------------------------------- signed out
 
     if (route === 'GET /api/session') {
-      return reply(200, { setup: users().length > 0, authed: Boolean(u), me: u ? { id: u.id, username: u.username, admin: u.admin } : null });
+      return reply(200, { setup: users().length > 0, authed: Boolean(u), mail: mailer.enabled, me: u ? { id: u.id, username: u.username, admin: u.admin } : null });
     }
 
     if (route === 'POST /api/setup') {
@@ -241,6 +255,46 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       delete data.resets[tokenHash(token)];
       store.save();
       return reply(200, { ok: true }, signIn(user));
+    }
+
+    // "Forgot password": always the same answer, whether or not the account
+    // exists or has an address on file. The mail goes out in the background so
+    // the response time gives nothing away either.
+    if (route === 'POST /api/forgot') {
+      if (!mailer.enabled) throw new HttpError(404, 'Not found.');
+      guardAttempts(req);
+      noteFailure(req); // every request counts against this client's limit
+      const { identifier } = await readJson(req);
+      const wanted = String(identifier ?? '').trim().toLowerCase();
+      const matches = wanted ? users().filter((x) => x.email && (x.username.toLowerCase() === wanted || x.email.toLowerCase() === wanted)) : [];
+      for (const user of matches) {
+        if (!mayMail(`reset:${user.id}`)) continue;
+        const token = newToken();
+        data.resets[tokenHash(token)] = { userId: user.id, expiresAt: now() + 30 * 60 * 1000 };
+        sendMail({
+          to: user.email,
+          subject: 'Reset your Show Tracker password',
+          text: `Hi ${user.username},\n\nSomeone asked to reset the password for your Show Tracker account. To choose a new one, open this link within 30 minutes:\n\n${mailer.link('reset', token)}\n\nIf that was not you, ignore this message; your password stays as it is.`,
+        });
+      }
+      if (matches.length) store.save();
+      return reply(200, { ok: true });
+    }
+
+    // Confirming an e-mail address from the link that was sent to it.
+    if (route === 'POST /api/email/confirm') {
+      guardAttempts(req);
+      const { token } = await readJson(req);
+      const hash = tokenHash(token ?? '');
+      const owner = users().find((x) => x.pendingEmail && x.pendingEmail.expiresAt > now() && safeEqual(x.pendingEmail.hash, hash));
+      if (!owner) {
+        noteFailure(req);
+        throw new HttpError(404, 'This confirmation link is not valid any more. Request a new one in Settings.');
+      }
+      owner.email = owner.pendingEmail.address;
+      owner.pendingEmail = null;
+      store.save();
+      return reply(200, { ok: true, email: owner.email });
     }
 
     // A list its owner chose to share: titles and schedule only.
@@ -437,6 +491,31 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         return reply(200, publicState(u));
       }
 
+      case 'PUT /api/account/email': {
+        const { email } = await readJson(req);
+        if (email === '' || email === null) {
+          u.email = '';
+          u.pendingEmail = null;
+          store.save();
+          return reply(200, publicState(u));
+        }
+        if (!mailer.enabled) throw new HttpError(400, 'E-mail is not set up on this site.');
+        const address = cleanEmail(email);
+        if (!address) throw new HttpError(400, 'That does not look like an e-mail address.');
+        if (!mayMail(`confirm:${u.id}`, 5) || !mayMail(`to:${address.toLowerCase()}`)) throw new HttpError(429, 'Too many confirmation e-mails. Try again in an hour.');
+        const token = newToken();
+        u.pendingEmail = { address, hash: tokenHash(token), expiresAt: now() + DAY_MS };
+        store.save();
+        await mailer.send({
+          to: address,
+          subject: 'Confirm your e-mail for Show Tracker',
+          text: `Hi ${u.username},\n\nTo use this address for password recovery on Show Tracker, open this link within 24 hours:\n\n${mailer.link('confirm', token)}\n\nIf you did not ask for this, ignore this message.`,
+        }).catch((e) => {
+          throw new HttpError(502, `Could not send the confirmation e-mail: ${e.message}`);
+        });
+        return reply(200, publicState(u));
+      }
+
       case 'POST /api/password': {
         guardAttempts(req);
         const { current, next } = await readJson(req);
@@ -531,7 +610,9 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
   const dataKey = process.env.DATA_KEY || '';
-  const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey });
+  const mailer = createMailer({ apiKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM, publicUrl: process.env.PUBLIC_URL });
+  const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer });
+  console.log(mailer.enabled ? 'E-mail recovery is on.' : 'E-mail recovery is off (needs RESEND_API_KEY, MAIL_FROM and PUBLIC_URL).');
   console.log(store.encrypted ? 'Data is encrypted at rest.' : 'WARNING: DATA_KEY is not set, so data is stored unencrypted.');
   if (setupCode) console.log(`No account exists yet. Setup code for the first visit: ${setupCode}`);
   // Locked out as admin? Start once with RECOVER_ADMIN=yes to get a reset link.

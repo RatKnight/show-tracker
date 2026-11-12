@@ -260,3 +260,6 @@ h2 .today { color: var(--accent); }
 .card .list { margin-top: 12px; }
 .card .list .row { background: var(--panel-2); }
 .card .actions { align-items: center; }
+.banner.good { border-color: var(--good); color: var(--good); }
+.auth .btn.quiet { align-self: flex-start; padding-left: 0; }
+.auth .btn.quiet:hover:not(:disabled) { color: var(--text); text-decoration: underline; }

@@ -10,6 +10,7 @@ import { buildIcs } from '../server/ics.js';
 import { computeDiscover } from '../server/discover.js';
 import { localClock, inQuietHours, summarize } from '../server/timing.js';
 import { buildBackup, readBackup, writeSnapshot } from '../server/backup.js';
+import { createMailer, cleanEmail } from '../server/mail.js';
 import { validateChannels, parseNtfy, ntfyPayloads, discordPayloads } from '../server/notify.js';
 import { hashPassword, checkPassword, cleanUsername, sessionCookie, sessionUser, tokenHash } from '../server/auth.js';
 import { DAY } from '../app/js/core.js';
@@ -445,7 +446,7 @@ test('http: setup, sign-in and the single-user features', async (t) => {
   assert.equal((await req('GET', '/')).status, 200);
   assert.equal((await req('GET', '/../server.js')).status, 404);
   assert.equal((await req('GET', '/%2e%2e/package.json')).status, 404);
-  assert.deepEqual((await req('GET', '/api/session')).body, { setup: false, authed: false, me: null });
+  assert.deepEqual((await req('GET', '/api/session')).body, { setup: false, authed: false, mail: false, me: null });
   assert.equal((await req('GET', '/api/state')).status, 401);
   assert.equal((await req('POST', '/api/shows', { source: 'anilist', id: 5 })).status, 401);
 
@@ -649,4 +650,82 @@ test('http hardening: malformed requests do not crash, guesses are limited', asy
   const g3 = client('203.0.113.5');
   for (let i = 0; i < 8; i++) assert.equal((await g3.req('GET', `/api/shared?token=guess${i}`)).status, 404);
   assert.equal((await g3.req('GET', '/api/link?kind=invite&token=guess')).status, 429);
+});
+
+test('mailer: off unless fully configured, links use the configured address', () => {
+  assert.equal(createMailer().enabled, false);
+  assert.equal(createMailer({ apiKey: 'k', from: 'a@b.co' }).enabled, false, 'needs a public URL');
+  assert.equal(createMailer({ apiKey: 'k', from: 'a@b.co', publicUrl: 'http://insecure.example' }).enabled, false, 'https only');
+  const m = createMailer({ apiKey: 'k', from: 'a@b.co', publicUrl: 'https://shows.example/some/path' });
+  assert.equal(m.enabled, true);
+  assert.equal(m.link('reset', 'tok'), 'https://shows.example/#reset=tok');
+  assert.equal(cleanEmail('  Ann@Example.com '), 'Ann@Example.com');
+  for (const bad of ['', 'nope', 'a@b', 'a b@c.de', 'a@b.c\nBcc: x@y.zz', '<a@b.co>', 42]) assert.equal(cleanEmail(bad), null);
+});
+
+test('http: e-mail confirmation and forgot-password', async (t) => {
+  const outbox = [];
+  const mailer = { enabled: true, link: (kind, token) => `https://shows.example/#${kind}=${token}`, send: async (m) => void outbox.push(m) };
+  const { setupCode, store, client } = await serve(t, { mailer });
+  const ann = client('198.51.100.1');
+  const anon = client('198.51.100.9');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  assert.equal((await anon.req('GET', '/api/session')).body.mail, true);
+  const tokenIn = (m) => /#\w+=([\w-]+)/.exec(m.text)[1];
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  // No address on file yet: asking for a reset sends nothing, and says nothing.
+  assert.deepEqual((await anon.req('POST', '/api/forgot', { identifier: 'ann' })).body, { ok: true });
+  assert.deepEqual((await anon.req('POST', '/api/forgot', { identifier: 'nobody' })).body, { ok: true });
+  await settle();
+  assert.equal(outbox.length, 0);
+
+  // An address only counts once its link has been opened.
+  assert.equal((await ann.req('PUT', '/api/account/email', { email: 'not an address' })).status, 400);
+  const pending = (await ann.req('PUT', '/api/account/email', { email: 'ann@example.com' })).body;
+  assert.deepEqual([pending.me.email, pending.me.pendingEmail], ['', 'ann@example.com']);
+  assert.equal(outbox.length, 1);
+  assert.deepEqual([outbox[0].to, outbox[0].text.includes('https://shows.example/#confirm=')], ['ann@example.com', true]);
+  assert.ok(!JSON.stringify(store.data.users).includes(tokenIn(outbox[0])), 'only a hash of the link is stored');
+  await anon.req('POST', '/api/forgot', { identifier: 'ann@example.com' });
+  await settle();
+  assert.equal(outbox.length, 1, 'unconfirmed address is not used');
+  assert.equal((await anon.req('POST', '/api/email/confirm', { token: 'wrong' })).status, 404);
+  assert.equal((await anon.req('POST', '/api/email/confirm', { token: tokenIn(outbox[0]) })).body.email, 'ann@example.com');
+  assert.equal((await anon.req('POST', '/api/email/confirm', { token: tokenIn(outbox[0]) })).status, 404, 'single use');
+  assert.deepEqual((await ann.req('GET', '/api/state')).body.me.email, 'ann@example.com');
+
+  // Forgot password, by username or by address, then reset with the mailed link.
+  await client('198.51.100.10').req('POST', '/api/forgot', { identifier: 'ANN' });
+  await client('198.51.100.11').req('POST', '/api/forgot', { identifier: 'Ann@Example.com' });
+  await settle();
+  assert.equal(outbox.length, 3);
+  assert.equal(outbox[2].subject, 'Reset your Show Tracker password');
+  const fresh = client('198.51.100.12');
+  assert.equal((await fresh.req('POST', '/api/reset', { token: tokenIn(outbox[2]), password: 'brand-new-password' })).status, 200);
+  assert.equal((await fresh.req('GET', '/api/state')).body.me.username, 'ann');
+  assert.equal((await ann.req('GET', '/api/state')).status, 401, 'old sessions end');
+
+  // No more than three reset mails an hour per account, whoever asks.
+  for (let i = 0; i < 4; i++) await client(`198.51.100.${20 + i}`).req('POST', '/api/forgot', { identifier: 'ann' });
+  await settle();
+  assert.equal(outbox.length, 4, 'third and later requests this hour are dropped');
+  // And one client cannot hammer the form.
+  const pest = client('198.51.100.40');
+  for (let i = 0; i < 8; i++) await pest.req('POST', '/api/forgot', { identifier: `x${i}` });
+  assert.equal((await pest.req('POST', '/api/forgot', { identifier: 'ann' })).status, 429);
+
+  // Removing the address switches recovery by mail off for the account.
+  assert.equal((await fresh.req('PUT', '/api/account/email', { email: '' })).body.me.email, '');
+  // The admin roster never includes addresses.
+  assert.ok(!JSON.stringify((await fresh.req('GET', '/api/admin/users')).body).includes('example.com'));
+});
+
+test('http: e-mail features are closed when mail is not configured', async (t) => {
+  const { setupCode, client } = await serve(t);
+  const ann = client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  assert.equal((await ann.req('POST', '/api/forgot', { identifier: 'ann' })).status, 404);
+  assert.equal((await ann.req('PUT', '/api/account/email', { email: 'ann@example.com' })).status, 400);
+  assert.equal((await ann.req('GET', '/api/state')).body.mail, false);
 });
