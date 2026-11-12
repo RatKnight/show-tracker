@@ -292,3 +292,7 @@ a.btn { text-decoration: none; display: inline-block; }
 dialog.ask { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); padding: 20px; width: min(380px, calc(100vw - 32px)); }
 dialog.ask::backdrop { background: rgb(0 0 0 / .55); }
 dialog.ask h3 { font-size: 18px; margin-bottom: 6px; }
+
+/* ---------- watch next ---------- */
+details > summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
+details[open] > summary { margin-bottom: 10px; }

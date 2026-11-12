@@ -27,13 +27,20 @@ export function createMailer({ apiKey = '', from = '', publicUrl = '' } = {}) {
     enabled,
     /** Absolute link to a one-time page of the app, e.g. link('reset', token). */
     link: (kind, token) => `${base}/#${kind}=${token}`,
-    async send({ to, subject, text }) {
+    /** attachments: [{ filename, content (Buffer or string) }] */
+    async send({ to, subject, text, attachments }) {
       if (!enabled) throw new Error('E-mail is not configured.');
       const res = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from, to: [to], subject, text }),
-        signal: AbortSignal.timeout(15000),
+        body: JSON.stringify({
+          from,
+          to: [to],
+          subject,
+          text,
+          ...(attachments?.length ? { attachments: attachments.map((a) => ({ filename: a.filename, content: Buffer.from(a.content).toString('base64') })) } : {}),
+        }),
+        signal: AbortSignal.timeout(30000),
         redirect: 'error',
       });
       if (!res.ok) throw new Error(`The mail service replied ${res.status}`);

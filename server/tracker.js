@@ -6,6 +6,7 @@
 import { collectAlerts, myStreams } from '../app/js/core.js';
 import { computeDiscover, buildSeries } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
+import { readFileSync } from 'node:fs';
 import { buildBackup, writeSnapshot } from './backup.js';
 import { matchEpisode, normTitle, sameSeries } from './extmatch.js';
 
@@ -14,7 +15,7 @@ const MAX_TRACKED = 1000;
 export const REFRESH_EVERY = 30 * 60 * 1000;
 export const DISCOVER_EVERY = 12 * 60 * 60 * 1000;
 
-export function createTracker({ store, sources, send, sendFile = async () => {}, now = Date.now }) {
+export function createTracker({ store, sources, send, sendFile = async () => {}, mailer = { enabled: false }, now = Date.now }) {
   const { data } = store;
   let refreshing = null;
   let lastAttempt = 0;
@@ -401,6 +402,56 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     return added;
   }
 
+  const admins = () => users().filter((u) => u.admin);
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+
+  /**
+   * Off-site copy: once a week, e-mail the encrypted data file to every admin
+   * with a confirmed address. Never sent unencrypted.
+   */
+  async function emailBackup() {
+    if (!data.site.backupEmail || !mailer.enabled || !store.encrypted || now() - data.lastBackupEmail <= WEEK) return;
+    const to = admins().filter((u) => u.email);
+    if (!to.length) return;
+    // Recorded first, so a failing mail service is retried next week rather than every minute.
+    data.lastBackupEmail = now();
+    store.save();
+    const day = new Date(now()).toISOString().slice(0, 10);
+    const file = readFileSync(store.file);
+    for (const u of to) {
+      await mailer
+        .send({
+          to: u.email,
+          subject: `Show Tracker backup ${day}`,
+          text: `Hi ${u.username},\n\nAttached is this week's copy of the Show Tracker data file (${Object.keys(data.users).length} accounts). It is encrypted: restoring it needs the DATA_KEY the site runs with, so keep that somewhere safe too.\n\nTo restore: stop the app, put this file in the data folder as state.json, and start the app with the same DATA_KEY.\n\nYou can switch these e-mails off in the Admin tab.`,
+          attachments: [{ filename: `show-tracker-state-${day}.json`, content: file }],
+        })
+        .catch((e) => {
+          u.lastError = `Weekly backup e-mail failed — ${e.message}`;
+          store.save();
+        });
+    }
+  }
+
+  /**
+   * Tell the admins when schedule updates have been failing for hours, and
+   * again when they recover. Uses their own alert channels, plus e-mail.
+   */
+  async function checkHealth() {
+    if (!data.site.healthAlerts || !Object.keys(data.catalog).length) return;
+    const stale = now() - data.lastRefresh > 3 * 60 * 60 * 1000;
+    if (stale === data.staleAlerted) return;
+    data.staleAlerted = stale;
+    store.save();
+    const message = stale
+      ? { title: 'Show Tracker: schedule updates are failing', body: `No successful update for over 3 hours. ${data.lastError || ''}`.trim() }
+      : { title: 'Show Tracker: schedule updates are working again', body: 'Updates recovered.' };
+    for (const u of admins()) {
+      await send(u.settings, [{ ...message, at: now() }]).catch(() => {});
+      if (mailer.enabled && u.email) await mailer.send({ to: u.email, subject: message.title, text: `Hi ${u.username},\n\n${message.body}\n\nYou can switch these alerts off in the Admin tab.` }).catch(() => {});
+    }
+  }
+
   /** Daily copy of the data file; weekly personal backup to Discord for those who opted in. */
   async function runBackups() {
     const { day } = localClock(now(), '');
@@ -459,6 +510,8 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
 
   return {
     showsOf,
+    emailBackup,
+    checkHealth,
     reportWatched,
     noteSeen,
     resolveSeen,
@@ -489,6 +542,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       const had = Object.hasOwn(u.shows, key);
       const wasAnime = data.catalog[key]?.source === 'anilist';
       delete u.shows[key];
+      delete u.progress[key];
       u.muted = u.muted.filter((k) => k !== key);
       // Remembered, so a season that was removed is not added back automatically.
       if (had && !u.dismissed.includes(key)) u.dismissed = [...u.dismissed, key].slice(-2000);
@@ -532,6 +586,8 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
         await refreshCinema().catch((e) => console.error('Cinema refresh failed:', e.message));
       }
       await fillFranchises().catch((e) => console.error('Franchise lookup failed:', e.message));
+      await emailBackup().catch((e) => console.error('Backup e-mail failed:', e.message));
+      await checkHealth().catch((e) => console.error('Health check failed:', e.message));
       await runBackups().catch((e) => console.error('Backup failed:', e.message));
       // Expired invite and reset links are of no further use.
       for (const bag of [data.invites, data.resets]) {

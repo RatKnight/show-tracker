@@ -27,6 +27,8 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
 - **Alerts** – when an episode of a tracked show airs, the server sends a push
   through [ntfy](https://ntfy.sh) and/or a Discord webhook, and lists it in the
   Alerts tab. Set the channels up under *Settings*.
+- **Watch next** – for each show, how many aired episodes you have left and which
+  is next, with a link to your streaming service, *Watched* and *Caught up*.
 - **Watched tracking** – recently aired episodes show a *Mark watched* button, and
   anything you have not watched yet is listed first.
 - **Browser extension** (optional) – `extension/` holds a Firefox extension that
@@ -34,9 +36,14 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
   [extension/README.md](extension/README.md).
 - **Alert timing** – send alerts as episodes air or as one daily summary, set quiet
   hours, get a heads-up before an episode airs, and mute individual shows.
-- **Backups** – a daily snapshot on the server (`/data/backups`, last 14 days), a
-  downloadable backup file with restore, and an optional weekly copy posted to your
-  Discord channel. Backup files never contain the password or alert addresses.
+- **Backups** – a daily copy of the (encrypted) data file on the server
+  (`/data/backups`, last 14 days); a weekly e-mail of that file to the admin as an
+  off-site copy (when e-mail is set up and data is encrypted); a per-person
+  downloadable backup with restore; and an optional weekly personal copy posted to
+  your Discord channel.
+- **Admin alerts** – the admin is told when schedule updates have been failing for
+  three hours, and account owners are e-mailed when an admin resets their password,
+  removes their passkeys or deletes their account.
 - **Import** – pull in the Watching and Planning lists of a public AniList profile.
 - **Installable** – add it to your phone's home screen or install it from the
   browser on desktop.

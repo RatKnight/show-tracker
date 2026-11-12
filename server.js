@@ -81,7 +81,7 @@ async function readJson(req, limit = 64 * 1024) {
 export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, mailer = createMailer(), publicUrl = '', now = Date.now } = {}) {
   const store = openStore(dataDir, { dataKey });
   const { data } = store;
-  const tracker = createTracker({ store, sources, send, sendFile, now });
+  const tracker = createTracker({ store, sources, send, sendFile, mailer, now });
 
   // Until the first account exists, creating it needs this code from the server
   // log, so a stranger who finds the site first cannot claim it.
@@ -160,6 +160,19 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
   };
   const passkeyPrompt = (req, user) => requestOptions({ rpId: siteOf(req).rpId, challenge: setChallenge(`login:${user.id}`), allow: user.passkeys });
 
+  /**
+   * An admin can reset or unlock anyone's account, so the account's owner is
+   * told whenever that happens (when they have a confirmed address).
+   */
+  const tellOwner = (target, admin, what) => {
+    if (!mailer.enabled || !target?.email || target.id === admin.id) return;
+    sendMail({
+      to: target.email,
+      subject: 'A change was made to your Show Tracker account',
+      text: `Hi ${target.username},\n\nThe site admin (${admin.username}) ${what}.\n\nIf you asked for this, there is nothing to do. If you did not, get in touch with them.`,
+    });
+  };
+
   const DAY_MS = 24 * 60 * 60 * 1000;
   const users = () => Object.values(data.users);
   const findUser = (name) => users().find((u) => u.username.toLowerCase() === String(name).toLowerCase()) || null;
@@ -200,6 +213,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     feedToken: u.feedToken,
     shareToken: u.shareToken,
     watched: u.watched,
+    progress: u.progress,
     muted: u.muted,
     // Which tracked shows are seasons of the same series: show key -> { id, title }.
     series: u.discover?.series || {},
@@ -223,6 +237,8 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     encrypted: store.encrypted,
     mail: mailer.enabled,
     movies: movies(),
+    site: data.site,
+    lastBackupEmail: data.lastBackupEmail || null,
     users: users()
       .map((x) => ({ id: x.id, username: x.username, admin: x.admin, createdAt: x.createdAt, mfa: hasMfa(x) }))
       .sort((a, b) => a.createdAt - b.createdAt),
@@ -479,6 +495,13 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         case 'GET /api/admin/users':
           return reply(200, adminView());
 
+        case 'PUT /api/admin/site': {
+          const body = await readJson(req);
+          for (const key of ['backupEmail', 'healthAlerts']) if (typeof body[key] === 'boolean') data.site[key] = body[key];
+          store.save();
+          return reply(200, adminView());
+        }
+
         case 'POST /api/admin/invites': {
           const body = req.headers['content-type'] ? await readJson(req) : {};
           const note = typeof body.note === 'string' ? body.note.trim().slice(0, 60) : '';
@@ -504,6 +527,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           const token = newToken();
           data.resets[tokenHash(token)] = { userId: id, expiresAt: now() + DAY_MS };
           store.save();
+          tellOwner(data.users[id], u, 'created a password reset link for your account');
           return reply(200, { token });
         }
 
@@ -513,6 +537,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           if (id === u.id) throw new HttpError(400, 'Remove your own passkeys under Security instead.');
           clearMfa(data.users[id]);
           store.save();
+          tellOwner(data.users[id], u, 'removed the passkeys and recovery codes from your account');
           return reply(200, adminView());
         }
 
@@ -520,6 +545,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           const id = url.searchParams.get('id') || '';
           if (!Object.hasOwn(data.users, id)) throw new HttpError(400, 'Unknown user.');
           if (id === u.id) throw new HttpError(400, 'You cannot delete your own account here.');
+          tellOwner(data.users[id], u, 'deleted your account');
           tracker.removeUser(id);
           return reply(200, adminView());
         }
@@ -599,6 +625,19 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         return reply(200, publicState(u));
       }
 
+      // "Caught up": everything up to an episode number counts as watched.
+      case 'POST /api/progress': {
+        const { key, through } = await readJson(req);
+        if (typeof key !== 'string' || !Object.hasOwn(u.shows, key) || !key.startsWith('anilist:')) throw new HttpError(400, 'Unknown show.');
+        if (!Number.isInteger(through) || through < 0 || through > 10000) throw new HttpError(400, 'Bad episode number.');
+        if (through) u.progress[key] = through;
+        else delete u.progress[key];
+        // Individual marks at or below that number are now redundant.
+        u.watched = u.watched.filter((id) => !(id.startsWith(`${key}:`) && Number(id.slice(key.length + 1)) <= through));
+        store.save();
+        return reply(200, publicState(u));
+      }
+
       case 'POST /api/shows/mute': {
         const { key, muted } = await readJson(req);
         if (typeof key !== 'string' || !Object.hasOwn(u.shows, key)) throw new HttpError(400, 'Unknown show.');
@@ -627,6 +666,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         }
         const added = await tracker.addMany(u, backup.shows);
         u.watched = [...new Set([...u.watched, ...backup.watched])].slice(-5000);
+        for (const [k, n] of Object.entries(backup.progress)) if (Object.hasOwn(u.shows, k)) u.progress[k] = Math.max(u.progress[k] || 0, n);
         u.muted = [...new Set([...u.muted, ...backup.muted])].filter((k) => Object.hasOwn(u.shows, k));
         u.dismissed = [...new Set([...u.dismissed, ...backup.dismissed])].slice(-2000);
         if (Array.isArray(backup.settings.services)) u.settings.services = backup.settings.services.filter((x) => Object.hasOwn(SERVICES, x));

@@ -15,6 +15,8 @@ import {
   animeSeason,
   normalizeTmdb,
   dateOnlyTime,
+  isWatched,
+  watchState,
 } from '../app/js/core.js';
 
 const NOW = new Date(2026, 10, 12, 12, 0).getTime();
@@ -226,4 +228,29 @@ test('normalizeTmdb turns US release dates into events', () => {
   assert.deepEqual([old.episodes, old.tickets, old.status], [[], null, 'Released']);
   const bare = normalizeTmdb({ id: 7, title: 'Search hit' }, NOW);
   assert.deepEqual([bare.episodes, bare.streams, bare.note], [[], [], 'No release date announced']);
+});
+
+test('watchState: how far behind, what is next, and progress markers', () => {
+  // An airing season: episode 8 is out (the next to air is 9).
+  const airing = normalizeAnilist({ ...media, episodes: 12, nextAiringEpisode: { episode: 9, airingAt: sec(NOW + DAY) } }, [{ episode: 8, airingAt: sec(NOW - DAY) }, { episode: 9, airingAt: sec(NOW + DAY) }], NOW);
+  assert.deepEqual([airing.aired, airing.total], [8, 12]);
+  const k = airing.key;
+  assert.deepEqual(watchState(airing, new Set(), 0, NOW), { behind: 8, next: { id: `${k}:1`, label: 'Episode 1' }, started: false });
+  // Watched up to 5, plus episode 7 on its own: 6 and 8 remain.
+  assert.deepEqual(watchState(airing, new Set([`${k}:7`]), 5, NOW), { behind: 2, next: { id: `${k}:6`, label: 'Episode 6' }, started: true });
+  assert.deepEqual(watchState(airing, new Set(), 8, NOW), { behind: 0, next: null, started: true });
+  assert.ok(isWatched(airing, { id: `${k}:3` }, new Set(), 5) && !isWatched(airing, { id: `${k}:6` }, new Set(), 5) && isWatched(airing, { id: `${k}:6` }, new Set([`${k}:6`]), 5));
+
+  // Finished: all episodes are out. Not yet released: none. Unknown progress: no claim.
+  assert.equal(normalizeAnilist({ ...media, status: 'FINISHED', episodes: 24 }, [], NOW).aired, 24);
+  assert.equal(normalizeAnilist({ ...media, status: 'NOT_YET_RELEASED', startDate: { year: 2027, month: 4, day: null } }, [], NOW).aired, 0);
+  const unknown = normalizeAnilist({ ...media, status: 'RELEASING' }, [], NOW);
+  assert.equal(unknown.aired, null);
+  assert.equal(watchState(unknown, new Set(), 0, NOW), null);
+
+  // TV shows only keep recent episodes; films have nothing to catch up on.
+  const tv = normalizeTvmaze({ id: 3, name: 'T', _embedded: { episodes: [{ id: 1, season: 2, number: 1, airstamp: new Date(NOW - 2 * DAY).toISOString() }, { id: 2, season: 2, number: 2, airstamp: new Date(NOW - DAY).toISOString() }, { id: 3, season: 2, number: 3, airstamp: new Date(NOW + DAY).toISOString() }] } }, NOW);
+  assert.deepEqual(watchState(tv, new Set(['tvmaze:3:2x1']), 0, NOW), { behind: 1, next: { id: 'tvmaze:3:2x2', label: 'S2E2' }, started: true });
+  assert.ok(!isWatched(tv, { id: 'tvmaze:3:2x2' }, new Set(), 99), 'progress numbers apply to anime only');
+  assert.equal(watchState(normalizeTmdb({ id: 5, title: 'Film', release_date: '2026-12-25' }, NOW), new Set(), 0, NOW), null);
 });

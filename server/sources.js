@@ -7,7 +7,7 @@ const ANILIST = 'https://graphql.anilist.co';
 const TVMAZE = 'https://api.tvmaze.com';
 
 const MEDIA_FIELDS = `
-  id format status siteUrl genres averageScore
+  id format status siteUrl genres averageScore episodes
   title { romaji english }
   coverImage { medium }
   startDate { year month day }
