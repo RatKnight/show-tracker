@@ -199,6 +199,8 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     shareToken: u.shareToken,
     watched: u.watched,
     muted: u.muted,
+    // Which tracked shows are seasons of the same series: show key -> { id, title }.
+    series: u.discover?.series || {},
   });
 
   /** Suggestions, minus anything now tracked or waved away. */
@@ -497,6 +499,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           remindMinutes: [0, 10, 30, 60].includes(body.remindMinutes) ? body.remindMinutes : cur.remindMinutes,
           timeZone: validTimeZone(body.timeZone) ? body.timeZone : cur.timeZone,
           backupToDiscord: typeof body.backupToDiscord === 'boolean' ? body.backupToDiscord : cur.backupToDiscord,
+          autoTrackSeasons: typeof body.autoTrackSeasons === 'boolean' ? body.autoTrackSeasons : cur.autoTrackSeasons,
         };
         const problem = validateChannels(next);
         if (problem) throw new HttpError(400, problem);

@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0 }, mail: false };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0 }, mail: false };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -25,6 +25,7 @@ const ui = {
   mfa: null, // { options } while the second sign-in step is pending
   offerPasskey: false, // showing the "add a passkey" prompt after sign-in
   codes: null, // recovery codes to show once
+  openSeries: new Set(), // series expanded on the My shows tab
 };
 
 const shows = () => Object.values(state.shows);
@@ -457,60 +458,139 @@ function viewDiscover() {
   return out;
 }
 
+/** One tracked show (or one season inside a series) as a row. */
+function showRow(show, now, nested = false) {
+  const next = nextEpisode(show, now);
+  const nextText = next
+    ? `Next: ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`} (${formatCountdown(next.airsAt - now)})`
+    : show.note || 'No upcoming episode announced';
+  const muted = state.muted.includes(show.key);
+  return h(
+    'div',
+    { class: `row${nested ? ' nested' : ''}` },
+    thumb(show),
+    h('div', { class: 'body' }, h('div', { class: 'title' }, link(show.url, show.title)), h('div', { class: 'sub' }, `${show.status} · ${nextText}`)),
+    h(
+      'div',
+      { class: 'side' },
+      badges(show, { kind: !nested }),
+      h(
+        'button',
+        {
+          class: 'btn quiet',
+          type: 'button',
+          'aria-pressed': String(muted),
+          title: 'Muted shows still appear in the app but send no notifications',
+          onclick: () => act('POST', '/api/shows/mute', { key: show.key, muted: !muted }),
+        },
+        muted ? 'Muted — unmute' : 'Mute',
+      ),
+      h(
+        'button',
+        {
+          class: 'btn quiet',
+          type: 'button',
+          'aria-label': `Remove ${show.title}`,
+          onclick: () => {
+            if (!confirm(`Stop tracking "${show.title}"?`)) return;
+            act('DELETE', `/api/shows?key=${encodeURIComponent(show.key)}`);
+          },
+        },
+        'Remove',
+      ),
+    ),
+  );
+}
+
+/** Several seasons of one show, folded into a single row that opens to list them. */
+function seriesRow(title, seasons, now) {
+  const id = state.series[seasons[0].key].id;
+  const open = ui.openSeries.has(id);
+  // The season with the soonest episode speaks for the series.
+  const lead = [...seasons].sort((a, b) => (nextEpisode(a, now)?.airsAt ?? Infinity) - (nextEpisode(b, now)?.airsAt ?? Infinity))[0];
+  const next = nextEpisode(lead, now);
+  const nextText = next
+    ? `Next: ${lead.title} — ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`} (${formatCountdown(next.airsAt - now)})`
+    : seasons.map((x) => x.note).find(Boolean) || 'No upcoming episode announced';
+  const allMuted = seasons.every((x) => state.muted.includes(x.key));
+  const each = async (fn) => {
+    try {
+      for (const x of seasons) await fn(x);
+      ui.error = null;
+    } catch (e) {
+      ui.error = e.message;
+    }
+    render();
+  };
+  const head = h(
+    'div',
+    { class: 'row series' },
+    thumb(lead),
+    h('div', { class: 'body' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, `${seasons.length} seasons tracked · ${nextText}`)),
+    h(
+      'div',
+      { class: 'side' },
+      badges(lead, { kind: true }),
+      h(
+        'button',
+        {
+          class: 'btn',
+          type: 'button',
+          'aria-expanded': String(open),
+          onclick: () => {
+            open ? ui.openSeries.delete(id) : ui.openSeries.add(id);
+            render();
+          },
+        },
+        open ? 'Hide seasons' : 'Show seasons',
+      ),
+      h(
+        'button',
+        {
+          class: 'btn quiet',
+          type: 'button',
+          'aria-pressed': String(allMuted),
+          onclick: () => each((x) => call('POST', '/api/shows/mute', { key: x.key, muted: !allMuted })),
+        },
+        allMuted ? 'Muted — unmute' : 'Mute',
+      ),
+      h(
+        'button',
+        {
+          class: 'btn quiet',
+          type: 'button',
+          'aria-label': `Remove ${title}`,
+          onclick: () => {
+            if (confirm(`Stop tracking all ${seasons.length} seasons of "${title}"?`)) each((x) => call('DELETE', `/api/shows?key=${encodeURIComponent(x.key)}`));
+          },
+        },
+        'Remove',
+      ),
+    ),
+  );
+  const byYear = [...seasons].sort((a, b) => (a.year || 9999) - (b.year || 9999) || a.title.localeCompare(b.title));
+  return open ? [head, ...byYear.map((x) => showRow(x, now, true))] : head;
+}
+
 function viewShows() {
   if (!shows().length) {
     return empty('Your list is empty', 'Search for a title above and press Add.');
   }
   const now = Date.now();
-  const sorted = shows().sort((a, b) => {
-    const na = nextEpisode(a, now)?.airsAt ?? Infinity;
-    const nb = nextEpisode(b, now)?.airsAt ?? Infinity;
-    return na - nb || a.title.localeCompare(b.title);
-  });
+  // Seasons of the same series share one entry; everything else stands alone.
+  const entries = new Map();
+  for (const show of shows()) {
+    const series = state.series[show.key];
+    const id = series ? `series:${series.id}` : show.key;
+    if (!entries.has(id)) entries.set(id, { title: series?.title || show.title, seasons: [] });
+    entries.get(id).seasons.push(show);
+  }
+  const soonest = (e) => Math.min(...e.seasons.map((x) => nextEpisode(x, now)?.airsAt ?? Infinity));
+  const sorted = [...entries.values()].sort((a, b) => soonest(a) - soonest(b) || a.title.localeCompare(b.title));
   return h(
     'div',
     { class: 'list' },
-    sorted.map((show) => {
-      const next = nextEpisode(show, now);
-      const nextText = next
-        ? `Next: ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`} (${formatCountdown(next.airsAt - now)})`
-        : show.note || 'No upcoming episode announced';
-      return h(
-        'div',
-        { class: 'row' },
-        thumb(show),
-        h('div', { class: 'body' }, h('div', { class: 'title' }, link(show.url, show.title)), h('div', { class: 'sub' }, `${show.status} · ${nextText}`)),
-        h(
-          'div',
-          { class: 'side' },
-          badges(show, { kind: true }),
-          h(
-            'button',
-            {
-              class: 'btn quiet',
-              type: 'button',
-              'aria-pressed': String(state.muted.includes(show.key)),
-              title: 'Muted shows still appear in the app but send no notifications',
-              onclick: () => act('POST', '/api/shows/mute', { key: show.key, muted: !state.muted.includes(show.key) }),
-            },
-            state.muted.includes(show.key) ? 'Muted — unmute' : 'Mute',
-          ),
-          h(
-            'button',
-            {
-              class: 'btn quiet',
-              type: 'button',
-              'aria-label': `Remove ${show.title}`,
-              onclick: () => {
-                if (!confirm(`Stop tracking "${show.title}"?`)) return;
-                act('DELETE', `/api/shows?key=${encodeURIComponent(show.key)}`);
-              },
-            },
-            'Remove',
-          ),
-        ),
-      );
-    }),
+    sorted.map((e) => (e.seasons.length > 1 ? seriesRow(e.title, e.seasons, now) : showRow(e.seasons[0], now))),
   );
 }
 
@@ -589,6 +669,22 @@ function viewSettings() {
             ),
           ),
         ),
+      ),
+    ),
+    h(
+      'section',
+      {},
+      h('h2', {}, 'Seasons'),
+      h(
+        'div',
+        { class: 'card' },
+        h('p', { class: 'muted' }, 'Anime seasons are separate entries at the source. Seasons of the same show that you track are folded into one entry on My shows.'),
+        h(
+          'div',
+          { class: 'checks' },
+          h('label', {}, h('input', { type: 'checkbox', checked: s.autoTrackSeasons, onchange: (e) => act('PUT', '/api/settings', { autoTrackSeasons: e.target.checked }) }), 'Track new seasons of my anime automatically when they are announced'),
+        ),
+        h('p', { class: 'muted small' }, 'A season you remove yourself is not added back.'),
       ),
     ),
     h(
@@ -772,6 +868,24 @@ function viewSettings() {
     h(
       'section',
       {},
+      h('h2', {}, 'About'),
+      h(
+        'div',
+        { class: 'card' },
+        h('p', { class: 'muted' }, 'Anime schedules come from AniList and TV schedules from TVmaze. Anime times are the Japanese broadcast time; the episode usually reaches Crunchyroll or HIDIVE within an hour or so, but some simulcasts are delayed. Streaming-site tags are not region-specific, so double-check availability in your country.'),
+      ),
+    ),
+  ];
+}
+
+
+/** Your own account: name, e-mail, sharing, passkeys, password. */
+function viewProfile() {
+  const s = state.settings;
+  return [
+    h(
+      'section',
+      {},
       h('h2', {}, 'Account and sharing'),
       (() => {
         const out = h('p', { class: 'muted small', role: 'status' });
@@ -829,116 +943,10 @@ function viewSettings() {
         );
       })(),
     ),
-    state.me.admin &&
-      h(
-        'section',
-        {},
-        h('h2', {}, 'People (admin)'),
-        (() => {
-          load('admin', async () => (ui.admin = await call('GET', '/api/admin/users')));
-          const a = ui.admin;
-          if (!a) return h('div', { class: 'card' }, h('p', { class: 'muted' }, ui.loading.admin === 'busy' ? 'Loading…' : ui.loading.admin || ''));
-          const out = h('div', { class: 'linkbox', role: 'status' });
-          const showLink = (label, url, note) => {
-            out.replaceChildren(h('label', { class: 'field', for: 'one-time-link' }, label, h('input', { type: 'text', id: 'one-time-link', readonly: true, value: url, onfocus: (e) => e.target.select() })), h('p', { class: 'muted small' }, note));
-            out.querySelector('input').select();
-          };
-          const fail = (e) => out.replaceChildren(h('p', { class: 'error small' }, e.message));
-          return h(
-            'div',
-            { class: 'card' },
-            h('p', { class: a.encrypted ? 'muted' : 'error' }, a.encrypted ? 'Data is encrypted at rest.' : 'Data is NOT encrypted at rest: no DATA_KEY is set on the server.'),
-            h('p', { class: 'muted' }, a.mail ? 'E-mail recovery is on: people can add an address and reset their own password.' : 'E-mail recovery is off (the mail settings are missing on the server). You can still hand out reset links below.'),
-            h('p', { class: 'muted' }, 'You can see who has an account, but not what is on their lists. New people join through a one-time invite link.'),
-            h(
-              'div',
-              { class: 'list' },
-              a.users.map((p) =>
-                h(
-                  'div',
-                  { class: 'row' },
-                  h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, `Joined ${fmtShortDay.format(p.createdAt)} · ${p.mfa ? 'passkey on' : 'no passkey'}`)),
-                  h(
-                    'div',
-                    { class: 'side' },
-                    h(
-                      'button',
-                      {
-                        class: 'btn',
-                        type: 'button',
-                        onclick: () =>
-                          call('POST', '/api/admin/reset', { id: p.id }).then((r) => showLink(`Password reset link for ${p.username}`, `${location.origin}/#reset=${r.token}`, 'Works once, for 24 hours. Send it to them privately.'), fail),
-                      },
-                      'Reset link',
-                    ),
-                    p.id !== state.me.id &&
-                      p.mfa &&
-                      h(
-                        'button',
-                        {
-                          class: 'btn',
-                          type: 'button',
-                          title: 'For someone who lost their passkey and their recovery codes',
-                          onclick: async () => {
-                            if (!confirm(`Remove ${p.username}’s passkeys and recovery codes? They will sign in with their password alone until they add a new passkey.`)) return;
-                            try {
-                              ui.admin = await call('POST', '/api/admin/mfa/clear', { id: p.id });
-                              render();
-                            } catch (e) {
-                              fail(e);
-                            }
-                          },
-                        },
-                        'Remove passkeys',
-                      ),
-                                        p.id !== state.me.id &&
-                      h(
-                        'button',
-                        {
-                          class: 'btn quiet',
-                          type: 'button',
-                          onclick: async () => {
-                            if (!confirm(`Delete ${p.username}’s account and everything in it? This cannot be undone.`)) return;
-                            try {
-                              ui.admin = await call('DELETE', `/api/admin/users?id=${encodeURIComponent(p.id)}`);
-                              render();
-                            } catch (e) {
-                              fail(e);
-                            }
-                          },
-                        },
-                        'Delete',
-                      ),
-                  ),
-                ),
-              ),
-            ),
-            h(
-              'div',
-              { class: 'actions' },
-              h(
-                'button',
-                {
-                  class: 'btn primary',
-                  type: 'button',
-                  onclick: () =>
-                    call('POST', '/api/admin/invites').then((r) => {
-                      ui.admin = { users: r.users, pendingInvites: r.pendingInvites, encrypted: r.encrypted };
-                      showLink('Invite link', `${location.origin}/#invite=${r.token}`, 'Works once, for 7 days. Whoever opens it can create one account.');
-                    }, fail),
-                },
-                'Create an invite link',
-              ),
-              a.pendingInvites > 0 && h('span', { class: 'muted small' }, `${a.pendingInvites} unused invite${a.pendingInvites === 1 ? '' : 's'} outstanding`),
-            ),
-            out,
-          );
-        })(),
-      ),
     h(
       'section',
       {},
-      h('h2', {}, 'Security'),
+      h('h2', {}, 'Passkeys and password'),
       (() => {
         const out = h('p', { class: 'muted small', role: 'status' });
         const keys = state.me.passkeys;
@@ -1071,27 +1079,143 @@ function viewSettings() {
     h(
       'section',
       {},
-      h('h2', {}, 'About'),
+      h('h2', {}, 'Session'),
       h(
         'div',
         { class: 'card' },
-        h('p', { class: 'muted' }, 'Anime schedules come from AniList and TV schedules from TVmaze. Anime times are the Japanese broadcast time; the episode usually reaches Crunchyroll or HIDIVE within an hour or so, but some simulcasts are delayed. Streaming-site tags are not region-specific, so double-check availability in your country.'),
+        h('p', { class: 'muted' }, `Signed in as ${state.me.username}${state.me.admin ? ' (admin)' : ''}.`),
         h(
-          'button',
-          {
-            class: 'btn',
-            type: 'button',
-            onclick: async () => {
-              await call('POST', '/api/logout').catch(() => {});
-              location.reload();
-            },
-          },
-          'Sign out',
+          'div',
+          { class: 'actions' },
+            h(
+              'button',
+              {
+                class: 'btn',
+                type: 'button',
+                onclick: async () => {
+                  await call('POST', '/api/logout').catch(() => {});
+                  location.reload();
+                },
+              },
+              'Sign out',
+            ),
         ),
       ),
     ),
   ];
 }
+
+/** Site administration. Only reachable by admins; the server enforces it too. */
+function viewAdmin() {
+  return [
+    h(
+      'section',
+      {},
+      h('h2', {}, 'People'),
+      (() => {
+        load('admin', async () => (ui.admin = await call('GET', '/api/admin/users')));
+        const a = ui.admin;
+        if (!a) return h('div', { class: 'card' }, h('p', { class: 'muted' }, ui.loading.admin === 'busy' ? 'Loading…' : ui.loading.admin || ''));
+        const out = h('div', { class: 'linkbox', role: 'status' });
+        const showLink = (label, url, note) => {
+          out.replaceChildren(h('label', { class: 'field', for: 'one-time-link' }, label, h('input', { type: 'text', id: 'one-time-link', readonly: true, value: url, onfocus: (e) => e.target.select() })), h('p', { class: 'muted small' }, note));
+          out.querySelector('input').select();
+        };
+        const fail = (e) => out.replaceChildren(h('p', { class: 'error small' }, e.message));
+        return h(
+          'div',
+          { class: 'card' },
+          h('p', { class: a.encrypted ? 'muted' : 'error' }, a.encrypted ? 'Data is encrypted at rest.' : 'Data is NOT encrypted at rest: no DATA_KEY is set on the server.'),
+          h('p', { class: 'muted' }, a.mail ? 'E-mail recovery is on: people can add an address and reset their own password.' : 'E-mail recovery is off (the mail settings are missing on the server). You can still hand out reset links below.'),
+          h('p', { class: 'muted' }, 'You can see who has an account, but not what is on their lists. New people join through a one-time invite link.'),
+          h(
+            'div',
+            { class: 'list' },
+            a.users.map((p) =>
+              h(
+                'div',
+                { class: 'row' },
+                h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, `Joined ${fmtShortDay.format(p.createdAt)} · ${p.mfa ? 'passkey on' : 'no passkey'}`)),
+                h(
+                  'div',
+                  { class: 'side' },
+                  h(
+                    'button',
+                    {
+                      class: 'btn',
+                      type: 'button',
+                      onclick: () =>
+                        call('POST', '/api/admin/reset', { id: p.id }).then((r) => showLink(`Password reset link for ${p.username}`, `${location.origin}/#reset=${r.token}`, 'Works once, for 24 hours. Send it to them privately.'), fail),
+                    },
+                    'Reset link',
+                  ),
+                  p.id !== state.me.id &&
+                    p.mfa &&
+                    h(
+                      'button',
+                      {
+                        class: 'btn',
+                        type: 'button',
+                        title: 'For someone who lost their passkey and their recovery codes',
+                        onclick: async () => {
+                          if (!confirm(`Remove ${p.username}’s passkeys and recovery codes? They will sign in with their password alone until they add a new passkey.`)) return;
+                          try {
+                            ui.admin = await call('POST', '/api/admin/mfa/clear', { id: p.id });
+                            render();
+                          } catch (e) {
+                            fail(e);
+                          }
+                        },
+                      },
+                      'Remove passkeys',
+                    ),
+                                      p.id !== state.me.id &&
+                    h(
+                      'button',
+                      {
+                        class: 'btn quiet',
+                        type: 'button',
+                        onclick: async () => {
+                          if (!confirm(`Delete ${p.username}’s account and everything in it? This cannot be undone.`)) return;
+                          try {
+                            ui.admin = await call('DELETE', `/api/admin/users?id=${encodeURIComponent(p.id)}`);
+                            render();
+                          } catch (e) {
+                            fail(e);
+                          }
+                        },
+                      },
+                      'Delete',
+                    ),
+                ),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { class: 'actions' },
+            h(
+              'button',
+              {
+                class: 'btn primary',
+                type: 'button',
+                onclick: () =>
+                  call('POST', '/api/admin/invites').then((r) => {
+                    ui.admin = { users: r.users, pendingInvites: r.pendingInvites, encrypted: r.encrypted };
+                    showLink('Invite link', `${location.origin}/#invite=${r.token}`, 'Works once, for 7 days. Whoever opens it can create one account.');
+                  }, fail),
+              },
+              'Create an invite link',
+            ),
+            a.pendingInvites > 0 && h('span', { class: 'muted small' }, `${a.pendingInvites} unused invite${a.pendingInvites === 1 ? '' : 's'} outstanding`),
+          ),
+          out,
+        );
+      })(),
+    ),
+  ];
+}
+
 
 // ---------------------------------------------------------------- passkeys
 
@@ -1192,7 +1316,7 @@ function viewMfa() {
           try {
             const r = await call('POST', '/api/login/recovery', { code: code.value });
             await enterApp();
-            ui.info = `Signed in with a recovery code. ${r.recoveryCodesLeft} left — add a passkey on this device under Settings → Security.`;
+            ui.info = `Signed in with a recovery code. ${r.recoveryCodesLeft} left — add a passkey on this device under Profile → Passkeys and password.`;
             render();
           } catch (err) {
             msg.textContent = err.message;
@@ -1433,7 +1557,11 @@ const TABS = [
   ['shows', 'My shows', viewShows],
   ['alerts', 'Alerts', viewAlerts],
   ['settings', 'Settings', viewSettings],
+  ['admin', 'Admin', viewAdmin],
 ];
+/** Pages reached another way than the tab bar. */
+const PAGES = { profile: viewProfile };
+const visibleTabs = () => TABS.filter(([id]) => id !== 'admin' || state.me.admin);
 
 // ---------------------------------------------------------------- render
 
@@ -1464,7 +1592,7 @@ function render() {
   }
   const unread = state.alerts.filter((a) => !a.read).length;
   $('tabs').replaceChildren(
-    ...TABS.map(([id, label]) =>
+    ...visibleTabs().map(([id, label]) =>
       h(
         'button',
         {
@@ -1474,7 +1602,7 @@ function render() {
           onclick: () => setTab(id),
         },
         label,
-        id === 'shows' && shows().length > 0 && h('span', { class: 'muted' }, ` ${shows().length}`),
+        id === 'shows' && shows().length > 0 && h('span', { class: 'muted' }, ` ${new Set(shows().map((x) => state.series[x.key]?.id || x.key)).size}`),
         id === 'alerts' && unread > 0 && h('span', { class: 'count' }, unread),
       ),
     ),
@@ -1491,8 +1619,15 @@ function render() {
 
   document.title = unread ? `(${unread}) Show Tracker` : 'Show Tracker';
 
-  const view = TABS.find(([id]) => id === ui.tab)[2]();
-  $('view').replaceChildren(...[view].flat());
+  const profileBtn = $('profile-btn');
+  profileBtn.textContent = (state.me.username[0] || '?').toUpperCase();
+  profileBtn.title = `Profile: ${state.me.username}`;
+  profileBtn.setAttribute('aria-label', `Profile: ${state.me.username}`);
+  profileBtn.setAttribute('aria-current', ui.tab === 'profile' ? 'page' : 'false');
+
+  // An admin page left open by someone who is no longer an admin falls back to the start.
+  const build = PAGES[ui.tab] || visibleTabs().find(([id]) => id === ui.tab)?.[2] || viewUpcoming;
+  $('view').replaceChildren(...[build()].flat());
 }
 
 function setTab(id) {
@@ -1598,6 +1733,11 @@ document.addEventListener('pointerdown', (e) => {
 // ---------------------------------------------------------------- boot
 
 $('refresh-btn').addEventListener('click', refreshAll);
+$('profile-btn').addEventListener('click', () => {
+  closeResults();
+  setTab('profile');
+  window.scrollTo(0, 0);
+});
 $('home').addEventListener('click', () => {
   if (!ui.session?.authed) return;
   closeResults();
@@ -1650,7 +1790,7 @@ window.addEventListener('hashchange', () => {
 // Every minute: pick up new alerts and schedule changes from the server and keep
 // countdowns fresh. Skipped on Settings so typing is never interrupted.
 setInterval(async () => {
-  if (!ui.session?.authed || ui.tab === 'settings' || ui.tab === 'discover') return;
+  if (!ui.session?.authed || ['settings', 'discover', 'profile', 'admin'].includes(ui.tab)) return;
   await call('GET', '/api/state').catch(() => {});
   render();
 }, 60 * 1000);

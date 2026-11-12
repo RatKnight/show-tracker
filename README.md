@@ -17,6 +17,9 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
 - **Discover** – new seasons of anime you track (followed along the whole sequel
   chain, with an alert when one is announced), recommendations based on your list,
   and the most popular shows of this season and next, filterable to your services.
+- **Series** – anime seasons are separate entries at the source; seasons of the same
+  show are folded into one entry on *My shows*, and new seasons of anime you track
+  are added automatically when announced (switchable in *Settings*).
 - **Alerts** – when an episode of a tracked show airs, the server sends a push
   through [ntfy](https://ntfy.sh) and/or a Discord webhook, and lists it in the
   Alerts tab. Set the channels up under *Settings*.
@@ -83,7 +86,7 @@ yet. Setup code for the first visit: …`), so nobody else can claim a fresh ins
   someone's passkeys if they lose both their device and their codes. Passkeys are
   tied to the site's address, so set `PUBLIC_URL`.
 - Forgotten passwords are reset with a one-time link: created by an admin
-  (*Settings → People*), or, when e-mail is configured, sent to the address a
+  (*Admin* tab), or, when e-mail is configured, sent to the address a
   person has added and confirmed. Addresses are optional, used for nothing else,
   encrypted with the rest of the data, and not visible to other users or admins.
 

@@ -4,7 +4,7 @@
 // shows they track plus their own alerts, watched marks and settings. Every
 // function that touches personal data takes the user it acts for.
 import { collectAlerts, myStreams } from '../app/js/core.js';
-import { computeDiscover } from './discover.js';
+import { computeDiscover, buildSeries } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
 import { buildBackup, writeSnapshot } from './backup.js';
 
@@ -148,7 +148,20 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     const known = new Set(u.seenSequels);
     const news = found.sequels.filter((s) => s.fresh && !known.has(s.key));
     u.seenSequels = [...new Set([...u.seenSequels, ...found.sequels.map((s) => s.key)])].slice(-5000);
-    u.discover = { ...found, updatedAt: now() };
+    // Following a series means its new seasons join the list by themselves —
+    // except ones the user has removed or waved away.
+    const adopted = new Set();
+    if (u.settings.autoTrackSeasons) {
+      const wanted = found.sequels.filter((s) => s.fresh && !u.dismissed.includes(s.key) && !u.shows[s.key]);
+      if (wanted.length) {
+        await addMany(u, wanted.map((s) => ({ source: 'anilist', id: s.id })), { discover: false });
+        for (const s of wanted) if (u.shows[s.key]) adopted.add(s.key);
+      }
+    }
+    u.discover = { ...found, series: buildSeries(showsOf(u), found.links), updatedAt: now() };
+    delete u.discover.links;
+    // Name a new season after the series it belongs to, not the season before it.
+    for (const s of u.discover.sequels) s.from = u.discover.series[s.fromKey]?.title || s.from;
     if (!silent) {
       for (const s of news) {
         pushAlert(u, { showKey: s.key, show: snapshotOf(s), ep: { id: `season:${s.key}`, label: `New season of ${s.from}`, airsAt: now() }, read: false });
@@ -160,7 +173,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
         u,
         news.map((s) => ({
           title: s.title,
-          body: `New season of ${s.from} ${s.status === 'Airing' ? 'is airing' : 'announced'}${s.note ? ` — ${s.note.toLowerCase()}` : ''}`,
+          body: `New season of ${s.from} ${s.status === 'Airing' ? 'is airing' : 'announced'}${s.note ? ` — ${s.note.toLowerCase()}` : ''}${adopted.has(s.key) ? '. Added to your list.' : ''}`,
           url: s.url,
           image: s.image,
           at: now(),
@@ -221,7 +234,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
    * returns how many were new to them. Shows someone else already tracks are
    * reused from the catalog without another fetch.
    */
-  async function addMany(u, wanted) {
+  async function addMany(u, wanted, { discover = true } = {}) {
     const keyOf = (w) => `${w.source}:${w.id}`;
     const missing = wanted.filter((w) => !u.shows[keyOf(w)]);
     const toFetch = missing.filter((w) => !data.catalog[keyOf(w)]);
@@ -241,9 +254,12 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       u.shows[key] = { addedAt: w.addedAt || now() };
       added++;
     }
+    // Adding a show by hand overrides an earlier "not interested".
+    const now_ = new Set(missing.map(keyOf).filter((k) => u.shows[k]));
+    if (discover) u.dismissed = u.dismissed.filter((k) => !now_.has(k));
     if (added) {
       store.save();
-      discoverSoon(u);
+      if (discover) discoverSoon(u);
     }
     return added;
   }
@@ -296,6 +312,9 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       const wasAnime = data.catalog[key]?.source === 'anilist';
       delete u.shows[key];
       u.muted = u.muted.filter((k) => k !== key);
+      // Remembered, so a season that was removed is not added back automatically.
+      if (had && !u.dismissed.includes(key)) u.dismissed = [...u.dismissed, key].slice(-2000);
+      if (u.discover?.series) delete u.discover.series[key];
       pruneCatalog();
       store.save();
       if (had && wasAnime) discoverSoon(u);

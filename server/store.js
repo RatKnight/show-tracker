@@ -18,6 +18,7 @@ const settingsDefaults = () => ({
   remindMinutes: 0,
   timeZone: '',
   backupToDiscord: false,
+  autoTrackSeasons: true, // new seasons of tracked anime join the list by themselves
 });
 
 /** A complete user record: defaults, overlaid with whatever is given. */
