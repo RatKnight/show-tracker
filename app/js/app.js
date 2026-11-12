@@ -72,10 +72,31 @@ async function act(method, path, body) {
   try {
     await call(method, path, body);
     ui.error = null;
+    // Settings save as soon as they are changed; say so, since there is no Save button.
+    if (SAVES.some((prefix) => path.startsWith(prefix))) toast('Saved');
   } catch (e) {
     ui.error = e.message;
   }
   render();
+}
+
+/** Requests that store a preference (as opposed to actions like marking an episode watched). */
+const SAVES = ['/api/settings', '/api/share', '/api/shows/mute', '/api/admin/site'];
+
+/** A brief note in the bottom-right corner. */
+function toast(message) {
+  const el = document.getElementById('toast');
+  el.textContent = message;
+  el.hidden = false;
+  // Restart the fade when several changes come in a row.
+  el.classList.remove('show');
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => {
+    el.hidden = true;
+    el.classList.remove('show');
+  }, 2200);
 }
 
 // ---------------------------------------------------------------- dom helpers
@@ -930,7 +951,14 @@ function viewSettings() {
             {
               class: 'btn primary',
               type: 'button',
-              onclick: () => saveChannels().then(() => say('Saved.'), (e) => say(e.message)),
+              onclick: () =>
+                saveChannels().then(
+                  () => {
+                    say('Saved.');
+                    toast('Saved');
+                  },
+                  (e) => say(e.message),
+                ),
             },
             'Save',
           ),
@@ -1421,6 +1449,7 @@ function viewAdmin() {
         onchange: async (e) => {
           try {
             ui.admin = await call('PUT', '/api/admin/site', { [key]: e.target.checked });
+            toast('Saved');
             ui.error = null;
           } catch (err) {
             ui.error = err.message;
@@ -2050,9 +2079,10 @@ function render() {
   syncSearchSources();
   const profileBtn = $('profile-btn');
   profileBtn.textContent = (state.me.username[0] || '?').toUpperCase();
-  profileBtn.title = `Profile: ${state.me.username}`;
-  profileBtn.setAttribute('aria-label', `Profile: ${state.me.username}`);
+  profileBtn.title = `Account: ${state.me.username}`;
+  profileBtn.setAttribute('aria-label', `Account menu for ${state.me.username}`);
   profileBtn.setAttribute('aria-current', ui.tab === 'profile' ? 'page' : 'false');
+  $('menu-who').textContent = `Signed in as ${state.me.username}`;
 
   // An admin page left open by someone who is no longer an admin falls back to the start.
   const build = PAGES[ui.tab] || visibleTabs().find(([id]) => id === ui.tab)?.[2] || viewUpcoming;
@@ -2190,10 +2220,39 @@ document.addEventListener('pointerdown', (e) => {
 // ---------------------------------------------------------------- boot
 
 $('refresh-btn').addEventListener('click', refreshAll);
+// Account menu behind the profile button.
+const profileMenu = $('profile-menu');
+function closeMenu() {
+  profileMenu.hidden = true;
+  $('profile-btn').setAttribute('aria-expanded', 'false');
+}
 $('profile-btn').addEventListener('click', () => {
   closeResults();
-  setTab('profile');
+  const open = profileMenu.hidden;
+  profileMenu.hidden = !open;
+  $('profile-btn').setAttribute('aria-expanded', String(open));
+  if (open) profileMenu.querySelector('button').focus();
+});
+profileMenu.addEventListener('click', async (e) => {
+  const go = e.target.closest('button')?.dataset.go;
+  if (!go) return;
+  closeMenu();
+  if (go === 'logout') {
+    await call('POST', '/api/logout').catch(() => {});
+    location.reload();
+    return;
+  }
+  setTab(go);
   window.scrollTo(0, 0);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !profileMenu.hidden) {
+    closeMenu();
+    $('profile-btn').focus();
+  }
+});
+document.addEventListener('pointerdown', (e) => {
+  if (!profileMenu.hidden && !e.target.closest('.menu-wrap')) closeMenu();
 });
 $('home').addEventListener('click', () => {
   if (!ui.session?.authed) return;

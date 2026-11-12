@@ -29,13 +29,23 @@
     <div class="top-actions">
       <span class="muted small" id="refresh-status"></span>
       <button type="button" class="btn" id="refresh-btn">Refresh</button>
-      <button type="button" class="avatar" id="profile-btn" aria-label="Profile">?</button>
+      <div class="menu-wrap">
+        <button type="button" class="avatar" id="profile-btn" aria-label="Account menu" aria-haspopup="menu" aria-expanded="false">?</button>
+        <div class="menu" id="profile-menu" role="menu" hidden>
+          <div class="menu-who muted small" id="menu-who"></div>
+          <button type="button" role="menuitem" data-go="profile">Profile</button>
+          <button type="button" role="menuitem" data-go="settings">Settings</button>
+          <button type="button" role="menuitem" data-go="logout">Log out</button>
+        </div>
+      </div>
     </div>
   </header>
 
   <nav class="tabs" id="tabs" aria-label="Views"></nav>
   <div class="banner" id="banner" hidden></div>
   <main id="view"></main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
   <script type="module" src="js/app.js"></script>
 </body>
