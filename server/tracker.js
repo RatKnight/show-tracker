@@ -7,6 +7,7 @@ import { collectAlerts, myStreams } from '../app/js/core.js';
 import { computeDiscover, buildSeries } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
 import { buildBackup, writeSnapshot } from './backup.js';
+import { matchEpisode } from './extmatch.js';
 
 const MAX_ALERTS = 100;
 export const REFRESH_EVERY = 30 * 60 * 1000;
@@ -35,6 +36,64 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
   function pruneCatalog() {
     const wanted = new Set(users().flatMap((u) => Object.keys(u.shows)));
     for (const key of Object.keys(data.catalog)) if (!wanted.has(key)) delete data.catalog[key];
+    for (const key of Object.keys(data.franchise)) if (!wanted.has(key)) delete data.franchise[key];
+  }
+
+  /**
+   * Work out where tracked anime sit among their seasons (needed to translate a
+   * streaming site's episode numbers). A few per call, since each takes several
+   * requests; refreshed monthly because episode counts of airing seasons change.
+   */
+  async function fillFranchises(limit = 3) {
+    if (!sources.fetchFranchise) return 0;
+    const MONTH = 30 * 24 * 60 * 60 * 1000;
+    const due = Object.values(data.catalog)
+      .filter((s) => s.source === 'anilist' && now() - (data.franchise[s.key]?.at || 0) > MONTH)
+      .slice(0, limit);
+    for (const s of due) {
+      try {
+        data.franchise[s.key] = { ...(await sources.fetchFranchise(s.id)), at: now() };
+      } catch (e) {
+        // Remember the attempt so one bad entry cannot block the queue for long.
+        data.franchise[s.key] = { ...(data.franchise[s.key] || { root: s.title, offset: 0, index: 1, count: null }), at: now() - MONTH + 60 * 60 * 1000 };
+        console.error(`Franchise lookup failed for ${s.title}:`, e.message);
+      }
+    }
+    if (due.length) store.save();
+    return due.length;
+  }
+
+  /** How many of a user's anime still wait for that lookup. */
+  const franchisePending = (u) => Object.keys(u.shows).filter((k) => data.catalog[k]?.source === 'anilist' && !data.franchise[k]).length;
+
+  /**
+   * Mark episodes reported by the browser extension as watched.
+   * items: [{ series, season, episode }]. Returns counts and what could not be placed.
+   */
+  function reportWatched(u, items) {
+    const mine = showsOf(u).map((s) => ({ ...s, franchise: data.franchise[s.key] }));
+    const watched = new Set(u.watched);
+    const unmatched = new Map();
+    let matched = 0;
+    let added = 0;
+    for (const item of items) {
+      const hit = matchEpisode(item, mine);
+      if (!hit) {
+        if (unmatched.size < 50) unmatched.set(item.series, (unmatched.get(item.series) || 0) + 1);
+        continue;
+      }
+      matched++;
+      const id = `${hit.show.key}:${hit.number}`;
+      if (!watched.has(id)) {
+        watched.add(id);
+        added++;
+      }
+    }
+    if (added) {
+      u.watched = [...watched].slice(-5000);
+      store.save();
+    }
+    return { received: items.length, matched, added, unmatched: [...unmatched].map(([series, count]) => ({ series, count })), pending: franchisePending(u) };
   }
 
   /** What to say when something comes out: an episode, or a movie's release event. */
@@ -335,6 +394,8 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
 
   return {
     showsOf,
+    reportWatched,
+    fillFranchises,
     refreshCinema,
     cinema: () => cinema,
     checkAlerts,
@@ -400,6 +461,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
         cinemaAttempt = now();
         await refreshCinema().catch((e) => console.error('Cinema refresh failed:', e.message));
       }
+      await fillFranchises().catch((e) => console.error('Franchise lookup failed:', e.message));
       await runBackups().catch((e) => console.error('Backup failed:', e.message));
       // Expired invite and reset links are of no further use.
       for (const bag of [data.invites, data.resets]) {

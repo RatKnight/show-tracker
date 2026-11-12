@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0 }, mail: false, movies: false };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [] }, mail: false, movies: false };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -27,6 +27,7 @@ const ui = {
   offerPasskey: false, // showing the "add a passkey" prompt after sign-in
   codes: null, // recovery codes to show once
   newInvite: null, // an invite link just created, shown once
+  newToken: null, // an access token just created, shown once
   openSeries: new Set(), // series expanded on the My shows tab
 };
 
@@ -1105,6 +1106,81 @@ function viewProfile() {
     h(
       'section',
       {},
+      h('h2', {}, 'Browser extension'),
+      (() => {
+        const out = h('div', { class: 'linkbox', role: 'status' });
+        const name = h('input', { type: 'text', id: 'token-name', maxlength: 40, placeholder: 'e.g. Firefox on my PC', autocomplete: 'off' });
+        const tokens = state.me.apiTokens || [];
+        if (ui.newToken) {
+          setTimeout(() => {
+            out.replaceChildren(
+              h('label', { class: 'field', for: 'new-token' }, 'New access token', h('input', { type: 'text', id: 'new-token', readonly: true, value: ui.newToken, onfocus: (e) => e.target.select() })),
+              h('p', { class: 'muted small' }, `Paste it into the extension’s settings together with this site’s address (${location.origin}). It is shown only this once.`),
+            );
+            out.querySelector('input').select();
+          });
+        }
+        return h(
+          'div',
+          { class: 'card' },
+          h('p', { class: 'muted' }, 'The Show Tracker Sync extension marks episodes you finish on Crunchyroll as watched here. It signs in with an access token, which can report watched episodes and nothing else.'),
+          tokens.length > 0 &&
+            h(
+              'div',
+              { class: 'list' },
+              tokens.map((t) =>
+                h(
+                  'div',
+                  { class: 'row' },
+                  h('div', { class: 'body' }, h('div', { class: 'title' }, t.name), h('div', { class: 'sub' }, `Created ${fmtShortDay.format(t.createdAt)} · ${t.lastUsedAt ? `last used ${fmtShortDay.format(t.lastUsedAt)}` : 'never used'}`)),
+                  h(
+                    'div',
+                    { class: 'side' },
+                    h(
+                      'button',
+                      {
+                        class: 'btn quiet',
+                        type: 'button',
+                        onclick: () => {
+                          if (!confirm(`Remove the access token “${t.name}”? The extension using it will stop syncing.`)) return;
+                          ui.newToken = null;
+                          act('DELETE', `/api/tokens?id=${encodeURIComponent(t.id)}`);
+                        },
+                      },
+                      'Remove',
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          h('label', { class: 'field', for: 'token-name' }, 'Create an access token, named', name),
+          h(
+            'div',
+            { class: 'actions' },
+            h(
+              'button',
+              {
+                class: 'btn primary',
+                type: 'button',
+                onclick: () =>
+                  call('POST', '/api/tokens', { name: name.value }).then(
+                    (r) => {
+                      ui.newToken = r.token;
+                      render();
+                    },
+                    (e) => out.replaceChildren(h('p', { class: 'error small' }, e.message)),
+                  ),
+              },
+              'Create access token',
+            ),
+          ),
+          out,
+        );
+      })(),
+    ),
+    h(
+      'section',
+      {},
       h('h2', {}, 'Session'),
       h(
         'div',
@@ -1713,6 +1789,7 @@ function setTab(id) {
   }
   ui.tab = id;
   ui.newInvite = null;
+  ui.newToken = null;
   ui.notice = null;
   ui.info = null;
   render();

@@ -29,6 +29,9 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
   Alerts tab. Set the channels up under *Settings*.
 - **Watched tracking** – recently aired episodes show a *Mark watched* button, and
   anything you have not watched yet is listed first.
+- **Browser extension** (optional) – `extension/` holds a Firefox extension that
+  marks episodes you finish on Crunchyroll as watched here. See
+  [extension/README.md](extension/README.md).
 - **Alert timing** – send alerts as episodes air or as one daily summary, set quiet
   hours, get a heads-up before an episode airs, and mute individual shows.
 - **Backups** – a daily snapshot on the server (`/data/backups`, last 14 days), a

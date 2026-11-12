@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Show Tracker Sync",
+  "version": "0.1.0",
+  "description": "Marks episodes you watched on Crunchyroll as watched in your own Show Tracker.",
+  "browser_specific_settings": {
+    "gecko": { "id": "show-tracker-sync@ratknight.com", "strict_min_version": "121.0" }
+  },
+  "icons": { "192": "icon-192.png" },
+  "permissions": ["storage"],
+  "host_permissions": ["https://www.crunchyroll.com/*"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*"],
+  "background": { "scripts": ["background.js"], "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["https://www.crunchyroll.com/*"], "js": ["parse.js", "content.js"], "run_at": "document_idle" }
+  ],
+  "action": { "default_title": "Show Tracker Sync", "default_popup": "popup.html", "default_icon": "icon-192.png" },
+  "options_ui": { "page": "options.html", "open_in_tab": true }
+}

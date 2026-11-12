@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Show Tracker Sync – Settings</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+  <main>
+    <h1>Show Tracker Sync</h1>
+    <p class="muted">Connect this extension to your Show Tracker. Create an access token in Show Tracker under Profile → Browser extension.</p>
+    <form id="form">
+      <label for="site">Show Tracker address</label>
+      <input id="site" type="url" placeholder="https://shows.example.com" required>
+      <label for="token">Access token</label>
+      <input id="token" type="password" placeholder="st_…" autocomplete="off" required>
+      <button type="submit">Save and test</button>
+      <button type="button" class="plain" id="forget">Disconnect</button>
+    </form>
+    <p id="status" role="status"></p>
+    <p class="muted">The extension reads only your Crunchyroll history page and sends the show name and episode number of finished episodes to the address above. Nothing goes anywhere else.</p>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

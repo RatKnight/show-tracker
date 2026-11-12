@@ -172,6 +172,39 @@ export async function fetchUserList(userName) {
   return [...new Set(ids)];
 }
 
+/**
+ * Where an anime sits in its franchise: walk the prequel chain back to the first
+ * season, counting episodes of the TV seasons on the way.
+ * Returns { root, offset, index, count }.
+ */
+export async function fetchFranchise(id) {
+  const COUNTED = ['TV', 'TV_SHORT', 'ONA'];
+  const query = `query ($id: Int) {
+    Media(id: $id, type: ANIME) {
+      id episodes format
+      title { romaji english }
+      relations { edges { relationType node { id type } } }
+    }
+  }`;
+  const first = (await gql(query, { id })).Media;
+  let current = first;
+  let offset = 0;
+  let index = 1;
+  const seen = new Set([id]);
+  for (let depth = 0; depth < 15; depth++) {
+    const prequel = current.relations.edges.find((e) => e.relationType === 'PREQUEL' && e.node?.type === 'ANIME' && !seen.has(e.node.id));
+    if (!prequel) break;
+    seen.add(prequel.node.id);
+    current = (await gql(query, { id: prequel.node.id })).Media;
+    // Films and specials between seasons are not part of a site's episode count.
+    if (COUNTED.includes(current.format)) {
+      offset += current.episodes || 0;
+      index++;
+    }
+  }
+  return { root: current.title?.english || current.title?.romaji || '', offset, index, count: first.episodes || null };
+}
+
 // ---------------------------------------------------------------- movies (TMDB)
 //
 // Needs a TMDB "API Read Access Token" in TMDB_API_KEY. Without one, movie

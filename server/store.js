@@ -37,6 +37,7 @@ export function makeUser(fields) {
     pendingEmail: null, // { address, hash, expiresAt } until its link is clicked
     passkeys: [], // { id, name, publicKey, alg, signCount, transports, createdAt }
     recoveryCodes: [], // sha256 of each unused one-time code
+    apiTokens: [], // { id, name, hash, createdAt, lastUsedAt } for the browser extension
     shows: {}, // show key -> { addedAt }; the show itself lives in the shared catalog
     alerts: [],
     alerted: [],
@@ -148,6 +149,7 @@ export function openStore(dir, { dataKey = '' } = {}) {
     secret: token(32),
     users: {},
     catalog: {}, // show key -> schedule data, shared by everyone tracking it
+    franchise: {}, // anime show key -> { root, offset, index, count, at }: its place among its seasons
     invites: {}, // sha256(token) -> { expiresAt }
     resets: {}, // sha256(token) -> { userId, expiresAt }
     lastRefresh: 0,

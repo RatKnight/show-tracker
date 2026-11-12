@@ -187,6 +187,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       email: u.email,
       pendingEmail: u.pendingEmail?.expiresAt > now() ? u.pendingEmail.address : null,
       passkeys: u.passkeys.map((k) => ({ id: k.id, name: k.name, createdAt: k.createdAt })),
+      apiTokens: u.apiTokens.map((t) => ({ id: t.id, name: t.name, createdAt: t.createdAt, lastUsedAt: t.lastUsedAt || null })),
       recoveryCodesLeft: u.recoveryCodes.length,
     },
     mail: mailer.enabled,
@@ -242,6 +243,39 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     const secure = req.headers['x-forwarded-proto'] === 'https';
     const u = sessionUser(req.headers.cookie, data, now());
     const signIn = (user) => ({ 'Set-Cookie': sessionCookie(data.secret, user, secure, now()) });
+
+    // ---------------------------------------------------------- browser extension
+    // Signed in with a personal access token instead of the session cookie, so the
+    // cross-site check below (which protects cookies) does not apply. A token can
+    // only do what these routes offer: report watched episodes.
+    if (url.pathname.startsWith('/api/ext/')) {
+      guardAttempts(req);
+      const bearer = /^Bearer (st_[\w-]{20,})$/.exec(req.headers.authorization || '')?.[1];
+      const hash = bearer ? tokenHash(bearer) : '';
+      const owner = bearer ? users().find((x) => x.apiTokens.some((t) => safeEqual(t.hash, hash))) : null;
+      if (!owner) {
+        noteFailure(req);
+        throw new HttpError(401, 'That access token is not valid. Create a new one in your Show Tracker profile.');
+      }
+      const used = owner.apiTokens.find((t) => safeEqual(t.hash, hash));
+      // Saved at most hourly: this is only for the "last used" hint in the profile.
+      if (now() - (used.lastUsedAt || 0) > 60 * 60 * 1000) {
+        used.lastUsedAt = now();
+        store.save();
+      }
+      if (route === 'GET /api/ext/ping') return reply(200, { ok: true, username: owner.username });
+      if (route === 'POST /api/ext/watched') {
+        const { items } = await readJson(req, 512 * 1024);
+        const ok = (i) =>
+          i && typeof i.series === 'string' && i.series.length <= 200 && Number.isInteger(i.episode) && i.episode >= 1 && i.episode <= 5000 && (i.season == null || (Number.isInteger(i.season) && i.season >= 1 && i.season <= 50));
+        if (!Array.isArray(items) || items.length > 2000 || !items.every(ok)) throw new HttpError(400, 'Bad watch list.');
+        const result = tracker.reportWatched(owner, items.map((i) => ({ series: i.series, season: i.season ?? null, episode: i.episode })));
+        // Some shows still need their seasons looked up: start now instead of at the next minute.
+        if (result.pending) tracker.fillFranchises(6).catch((e) => console.error('Franchise lookup failed:', e.message));
+        return reply(200, result);
+      }
+      throw new HttpError(404, 'Not found.');
+    }
 
     // Browsers send Origin on cross-site writes; refuse any that are not ours.
     if (req.method !== 'GET' && req.headers.origin) {
@@ -633,6 +667,23 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       case 'PUT /api/account': {
         const { username } = await readJson(req);
         u.username = requireUsername(username, u);
+        store.save();
+        return reply(200, publicState(u));
+      }
+
+      case 'POST /api/tokens': {
+        const { name } = await readJson(req);
+        if (u.apiTokens.length >= 10) throw new HttpError(400, 'Remove an access token before adding another (10 at most).');
+        const token = `st_${newToken()}`;
+        u.apiTokens.push({ id: randomBytes(6).toString('hex'), name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 40) : 'Browser extension', hash: tokenHash(token), createdAt: now(), lastUsedAt: null });
+        store.save();
+        return reply(200, { ...publicState(u), token });
+      }
+
+      case 'DELETE /api/tokens': {
+        const id = url.searchParams.get('id') || '';
+        if (!u.apiTokens.some((t) => t.id === id)) throw new HttpError(400, 'Unknown access token.');
+        u.apiTokens = u.apiTokens.filter((t) => t.id !== id);
         store.save();
         return reply(200, publicState(u));
       }
