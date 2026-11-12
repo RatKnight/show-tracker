@@ -19,6 +19,7 @@ const settingsDefaults = () => ({
   timeZone: '',
   backupToDiscord: false,
   autoTrackSeasons: true, // new seasons of tracked anime join the list by themselves
+  cinemaAlerts: true, // tell me when an anime film gets a US cinema date
 });
 
 /** A complete user record: defaults, overlaid with whatever is given. */
@@ -45,6 +46,7 @@ export function makeUser(fields) {
     outbox: [],
     reminded: [],
     seenSequels: [],
+    seenCinema: null, // cinema listings already announced; null until the first look
     discover: null,
     lastDigestDay: null,
     lastDiscordBackup: 0,

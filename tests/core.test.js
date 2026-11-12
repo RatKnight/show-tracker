@@ -13,6 +13,8 @@ import {
   monthGrid,
   formatCountdown,
   animeSeason,
+  normalizeTmdb,
+  dateOnlyTime,
 } from '../app/js/core.js';
 
 const NOW = new Date(2026, 10, 12, 12, 0).getTime();
@@ -174,4 +176,54 @@ test('normalizeAnilist falls back to the next airing episode and keeps genres/sc
   const show = normalizeAnilist({ ...media, genres: ['Adventure', 'Drama'], averageScore: 91, nextAiringEpisode: { episode: 9, airingAt: sec(NOW + DAY) } }, undefined, NOW);
   assert.deepEqual(show.episodes.map((e) => e.label), ['Episode 9']);
   assert.deepEqual([show.genres, show.score, show.format], [['Adventure', 'Drama'], 91, 'TV']);
+});
+
+test('normalizeTmdb turns US release dates into events', () => {
+  const movie = {
+    id: 99,
+    title: 'Big Film',
+    original_title: 'Ōkina Eiga',
+    status: 'Post Production',
+    release_date: '2026-12-01',
+    poster_path: '/p.jpg',
+    vote_average: 7.84,
+    vote_count: 10,
+    genres: [{ name: 'Animation' }, { name: 'Drama' }],
+    release_dates: {
+      results: [
+        { iso_3166_1: 'JP', release_dates: [{ type: 3, release_date: '2026-08-01T00:00:00.000Z' }] },
+        {
+          iso_3166_1: 'US',
+          release_dates: [
+            { type: 1, release_date: '2026-12-10T00:00:00.000Z' }, // premiere: ignored
+            { type: 3, release_date: '2026-12-18T00:00:00.000Z' },
+            { type: 2, release_date: '2026-12-11T00:00:00.000Z' },
+            { type: 4, release_date: '2027-02-02T00:00:00.000Z' },
+          ],
+        },
+      ],
+    },
+    'watch/providers': { results: { US: { link: 'https://www.themoviedb.org/movie/99/watch', flatrate: [{ provider_name: 'Amazon Prime Video' }, { provider_name: 'Crunchyroll' }], rent: [{ provider_name: 'Apple TV' }] } } },
+  };
+  const m = normalizeTmdb(movie, NOW);
+  assert.deepEqual([m.key, m.kind, m.title, m.altTitle, m.status, m.year, m.score], ['tmdb:99', 'Movie', 'Big Film', 'Ōkina Eiga', 'Upcoming', 2026, 78]);
+  assert.equal(m.image, 'https://image.tmdb.org/t/p/w185/p.jpg');
+  assert.deepEqual(m.episodes.map((e) => [e.id, e.event, e.label, e.dateOnly]), [
+    ['tmdb:99:cinema', 'cinema', 'In US cinemas (limited)', true],
+    ['tmdb:99:digital', 'digital', 'Digital release', true],
+  ]);
+  // The earliest cinema date wins, and stays on its calendar day in US time zones.
+  assert.equal(m.episodes[0].airsAt, dateOnlyTime(2026, 12, 11));
+  assert.equal(new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(m.episodes[0].airsAt), '2026-12-11');
+  assert.equal(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin' }).format(m.episodes[0].airsAt), '2026-12-11');
+  assert.deepEqual(m.streams.map((s) => s.id), ['prime', 'crunchyroll'], 'subscription providers only, not rentals');
+  assert.match(m.tickets, /^https:\/\/www\.fandango\.com\/search\?q=Big%20Film$/);
+
+  // No US dates: fall back to the general release date. Long past: no events, no tickets.
+  const plain = normalizeTmdb({ id: 5, title: 'Plain', status: 'Released', release_date: '2026-12-25' }, NOW);
+  assert.deepEqual(plain.episodes.map((e) => [e.event, e.label]), [['release', 'Release']]);
+  const old = normalizeTmdb({ ...movie, id: 6, release_dates: { results: [{ iso_3166_1: 'US', release_dates: [{ type: 3, release_date: '2020-01-01T00:00:00.000Z' }] }] }, status: 'Released' }, NOW);
+  assert.deepEqual([old.episodes, old.tickets, old.status], [[], null, 'Released']);
+  const bare = normalizeTmdb({ id: 7, title: 'Search hit' }, NOW);
+  assert.deepEqual([bare.episodes, bare.streams, bare.note], [[], [], 'No release date announced']);
 });

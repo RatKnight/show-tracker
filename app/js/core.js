@@ -42,6 +42,12 @@ function dedupeStreams(streams) {
   });
 }
 
+/**
+ * Timestamp for an event known only by its date. Noon UTC keeps it on the same
+ * calendar day for the server and for viewers across the Americas and Europe.
+ */
+export const dateOnlyTime = (year, month, day) => Date.UTC(year, month - 1, day, 12);
+
 const ANILIST_STATUS = {
   RELEASING: 'Airing',
   NOT_YET_RELEASED: 'Upcoming',
@@ -75,7 +81,7 @@ export function normalizeAnilist(media, schedule, now = Date.now()) {
   let note = null;
   if (!episodes.length && sd.year) {
     if (sd.month && sd.day) {
-      const at = new Date(sd.year, sd.month - 1, sd.day).getTime();
+      const at = dateOnlyTime(sd.year, sd.month, sd.day);
       if (at >= now - PAST_WINDOW && media.status !== 'FINISHED') {
         episodes.push({
           id: `${key}:1`,
@@ -161,6 +167,59 @@ export function normalizeTvmaze(s, now = Date.now()) {
     status: TVMAZE_STATUS[s.status] || s.status || 'Unknown',
     year: s.premiered ? Number(s.premiered.slice(0, 4)) : null,
     note: null,
+    streams,
+    episodes,
+  };
+}
+
+const TMDB_IMAGES = 'https://image.tmdb.org/t/p/w185';
+// TMDB release types: 1 premiere, 2 limited theatrical, 3 theatrical, 4 digital, 5 physical, 6 TV.
+const CINEMA_TYPES = [3, 2];
+
+/**
+ * Turn a TMDB movie (with release_dates and watch/providers appended) into our
+ * show shape. A movie's "episodes" are its US release events: cinemas, digital.
+ */
+export function normalizeTmdb(m, now = Date.now()) {
+  const key = `tmdb:${m.id}`;
+  const day = (iso) => {
+    const [y, mo, d] = String(iso).slice(0, 10).split('-').map(Number);
+    return y && mo && d ? dateOnlyTime(y, mo, d) : null;
+  };
+  const us = (m.release_dates?.results || []).find((r) => r.iso_3166_1 === 'US')?.release_dates || [];
+  const earliest = (types) => {
+    const hits = us.filter((r) => types.includes(r.type) && day(r.release_date)).sort((a, b) => day(a.release_date) - day(b.release_date));
+    return hits[0] || null;
+  };
+  const cinema = earliest(CINEMA_TYPES);
+  const digital = earliest([4]);
+  const events = [];
+  if (cinema) events.push({ id: `${key}:cinema`, event: 'cinema', label: cinema.type === 2 ? 'In US cinemas (limited)' : 'In US cinemas', airsAt: day(cinema.release_date), dateOnly: true });
+  if (digital) events.push({ id: `${key}:digital`, event: 'digital', label: 'Digital release', airsAt: day(digital.release_date), dateOnly: true });
+  if (!events.length && day(m.release_date)) events.push({ id: `${key}:release`, event: 'release', label: 'Release', airsAt: day(m.release_date), dateOnly: true });
+  const episodes = events.filter((e) => e.airsAt >= now - PAST_WINDOW).sort((a, b) => a.airsAt - b.airsAt);
+
+  const providers = m['watch/providers']?.results?.US;
+  const streams = dedupeStreams((providers?.flatrate || []).map((p) => ({ id: serviceId(p.provider_name), name: p.provider_name, url: providers.link || null })));
+  // While it is in (or heading for) cinemas, offer a way to find showtimes.
+  const inCinemas = cinema && day(cinema.release_date) >= now - 60 * DAY;
+
+  return {
+    key,
+    source: 'tmdb',
+    id: m.id,
+    kind: 'Movie',
+    title: m.title || `Movie #${m.id}`,
+    altTitle: m.original_title && m.original_title !== m.title ? m.original_title : null,
+    image: m.poster_path ? TMDB_IMAGES + m.poster_path : null,
+    url: `https://www.themoviedb.org/movie/${m.id}`,
+    status: episodes.some((e) => e.airsAt > now) ? 'Upcoming' : m.status === 'Released' ? 'Released' : m.status || 'Unknown',
+    year: m.release_date ? Number(m.release_date.slice(0, 4)) || null : null,
+    format: 'Movie',
+    genres: (m.genres || []).map((g) => g.name).slice(0, 4),
+    score: m.vote_count ? Math.round(m.vote_average * 10) : null,
+    note: episodes.length || m.release_date ? null : 'No release date announced',
+    tickets: inCinemas ? `https://www.fandango.com/search?q=${encodeURIComponent(m.title || '')}` : null,
     streams,
     episodes,
   };

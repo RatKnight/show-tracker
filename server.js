@@ -190,6 +190,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       recoveryCodesLeft: u.recoveryCodes.length,
     },
     mail: mailer.enabled,
+    movies: movies(),
     shows: Object.fromEntries(tracker.showsOf(u).map((s) => [s.key, s])),
     alerts: u.alerts,
     settings: u.settings,
@@ -217,12 +218,15 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
   const adminView = () => ({
     encrypted: store.encrypted,
     mail: mailer.enabled,
+    movies: movies(),
     users: users()
       .map((x) => ({ id: x.id, username: x.username, admin: x.admin, createdAt: x.createdAt, mfa: hasMfa(x) }))
       .sort((a, b) => a.createdAt - b.createdAt),
     pendingInvites: Object.values(data.invites).filter((i) => i.expiresAt > now()).length,
   });
   const seasonCache = new Map();
+  /** Movie features need a TMDB key on the server. */
+  const movies = () => Boolean(sources.hasMovies?.());
 
   async function api(req, res, url) {
     const reply = (status, body, headers = {}) => {
@@ -469,13 +473,16 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       case 'GET /api/search': {
         const q = (url.searchParams.get('q') || '').trim().slice(0, 100);
         if (q.length < 2) return reply(200, []);
-        const found = await (url.searchParams.get('source') === 'tv' ? sources.searchTv(q) : sources.searchAnime(q));
+        const kind = url.searchParams.get('source');
+        if (kind === 'movie' && !movies()) throw new HttpError(400, 'Movies are not set up on this site.');
+        const found = await (kind === 'movie' ? sources.searchMovies(q) : kind === 'tv' ? sources.searchTv(q) : sources.searchAnime(q));
         return reply(200, found);
       }
 
       case 'POST /api/shows': {
         const { source, id } = await readJson(req);
-        if (!['anilist', 'tvmaze'].includes(source) || !Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Unknown show.');
+        if (!['anilist', 'tvmaze', 'tmdb'].includes(source) || !Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Unknown show.');
+        if (source === 'tmdb' && !movies()) throw new HttpError(400, 'Movies are not set up on this site.');
         await tracker.addShow(u, source, id);
         return reply(200, publicState(u));
       }
@@ -500,6 +507,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           timeZone: validTimeZone(body.timeZone) ? body.timeZone : cur.timeZone,
           backupToDiscord: typeof body.backupToDiscord === 'boolean' ? body.backupToDiscord : cur.backupToDiscord,
           autoTrackSeasons: typeof body.autoTrackSeasons === 'boolean' ? body.autoTrackSeasons : cur.autoTrackSeasons,
+          cinemaAlerts: typeof body.cinemaAlerts === 'boolean' ? body.cinemaAlerts : cur.cinemaAlerts,
         };
         const problem = validateChannels(next);
         if (problem) throw new HttpError(400, problem);
@@ -586,6 +594,12 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         if (!u.dismissed.includes(key)) u.dismissed = [...u.dismissed, key].slice(-2000);
         store.save();
         return reply(200, publicDiscover(u));
+      }
+
+      case 'GET /api/cinema': {
+        if (!movies()) throw new HttpError(400, 'Movies are not set up on this site.');
+        if (!tracker.cinema().updatedAt) await tracker.refreshCinema();
+        return reply(200, { list: tracker.cinema().list, updatedAt: tracker.cinema().updatedAt });
       }
 
       case 'GET /api/season': {
@@ -773,6 +787,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const dataKey = process.env.DATA_KEY || '';
   const mailer = createMailer({ apiKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM, publicUrl: process.env.PUBLIC_URL });
   const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer, publicUrl: process.env.PUBLIC_URL });
+  console.log(process.env.TMDB_API_KEY ? 'Movies are on.' : 'Movies are off (needs TMDB_API_KEY).');
   console.log(mailer.enabled ? 'E-mail recovery is on.' : 'E-mail recovery is off (needs RESEND_API_KEY, MAIL_FROM and PUBLIC_URL).');
   console.log(store.encrypted ? 'Data is encrypted at rest.' : 'WARNING: DATA_KEY is not set, so data is stored unencrypted.');
   if (setupCode) console.log(`No account exists yet. Setup code for the first visit: ${setupCode}`);

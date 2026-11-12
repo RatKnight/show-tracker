@@ -32,7 +32,7 @@ export function readBackup(input) {
   const strings = (v, max) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.length <= 80).slice(0, max) : []);
   return {
     shows: input.shows
-      .filter((s) => s && ['anilist', 'tvmaze'].includes(s.source) && Number.isInteger(s.id) && s.id > 0)
+      .filter((s) => s && ['anilist', 'tvmaze', 'tmdb'].includes(s.source) && Number.isInteger(s.id) && s.id > 0)
       .slice(0, 1000)
       .map((s) => ({ source: s.source, id: s.id, addedAt: Number.isFinite(s.addedAt) ? s.addedAt : null })),
     watched: strings(input.watched, 5000),

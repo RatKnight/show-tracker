@@ -1,7 +1,7 @@
 // Schedule data sources. Both APIs are free and need no key.
 //   Anime: AniList   https://docs.anilist.co
 //   TV:    TVmaze    https://www.tvmaze.com/api
-import { normalizeAnilist, normalizeTvmaze, PAST_WINDOW, FUTURE_WINDOW } from '../app/js/core.js';
+import { normalizeAnilist, normalizeTvmaze, normalizeTmdb, PAST_WINDOW, FUTURE_WINDOW, DAY } from '../app/js/core.js';
 
 const ANILIST = 'https://graphql.anilist.co';
 const TVMAZE = 'https://api.tvmaze.com';
@@ -170,4 +170,56 @@ export async function fetchUserList(userName) {
   }
   const ids = (data.MediaListCollection?.lists || []).flatMap((l) => l.entries.map((e) => e.mediaId));
   return [...new Set(ids)];
+}
+
+// ---------------------------------------------------------------- movies (TMDB)
+//
+// Needs a TMDB "API Read Access Token" in TMDB_API_KEY. Without one, movie
+// features are simply switched off.
+
+const TMDB = 'https://api.themoviedb.org/3';
+
+export const hasMovies = () => Boolean(process.env.TMDB_API_KEY);
+
+async function tmdb(path) {
+  const res = await fetch(TMDB + path, {
+    headers: { Authorization: `Bearer ${process.env.TMDB_API_KEY}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(20000),
+  });
+  if (res.status === 401) throw new Error('TMDB rejected the API key.');
+  if (res.status === 429) throw new Error('TMDB is rate limiting requests — try again in a minute.');
+  if (!res.ok) throw new Error(`TMDB request failed (${res.status})`);
+  return res.json();
+}
+
+export async function searchMovies(q) {
+  const data = await tmdb(`/search/movie?query=${encodeURIComponent(q)}&include_adult=false&region=US`);
+  return data.results.slice(0, 12).map((m) => normalizeTmdb(m));
+}
+
+/** One movie with its US release dates and where it streams. */
+export async function fetchMovie(id, now = Date.now()) {
+  return normalizeTmdb(await tmdb(`/movie/${id}?append_to_response=release_dates,watch/providers`), now);
+}
+
+/** Japanese animated films in US cinemas now or with a US cinema date announced. */
+export async function fetchCinemaAnime(now = Date.now()) {
+  const iso = (t) => new Date(t).toISOString().slice(0, 10);
+  const ids = [];
+  for (let page = 1; page <= 2; page++) {
+    const data = await tmdb(
+      `/discover/movie?region=US&with_release_type=2%7C3&release_date.gte=${iso(now - 30 * DAY)}&release_date.lte=${iso(now + 365 * DAY)}` +
+        `&with_genres=16&with_original_language=ja&include_adult=false&sort_by=primary_release_date.asc&page=${page}`,
+    );
+    ids.push(...data.results.map((m) => m.id));
+    if (page >= data.total_pages) break;
+  }
+  const movies = [];
+  for (const id of ids) {
+    const movie = await fetchMovie(id, now).catch(() => null);
+    // Keep only those whose US cinema date falls in the window once looked up exactly.
+    if (movie?.episodes.some((e) => e.event === 'cinema')) movies.push(movie);
+  }
+  const cinemaAt = (m) => m.episodes.find((e) => e.event === 'cinema').airsAt;
+  return movies.sort((a, b) => cinemaAt(a) - cinemaAt(b));
 }

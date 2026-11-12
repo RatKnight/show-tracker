@@ -17,6 +17,10 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
 - **Discover** – new seasons of anime you track (followed along the whole sequel
   chain, with an alert when one is announced), recommendations based on your list,
   and the most popular shows of this season and next, filterable to your services.
+- **Movies** (optional, needs a free [TMDB](https://www.themoviedb.org) key) – search
+  and track films; their US cinema and digital release dates appear on the calendar
+  with an alert on the day. *Discover → In cinemas* lists anime films with a US
+  cinema date, and you are told when a new one is announced.
 - **Series** – anime seasons are separate entries at the source; seasons of the same
   show are folded into one entry on *My shows*, and new seasons of anime you track
   are added automatically when announced (switchable in *Settings*).
@@ -63,6 +67,7 @@ Environment variables:
 | `DATA_KEY` | Encrypts the data file at rest (AES-256-GCM). At least 32 characters. **Keep a copy somewhere safe: without it the data cannot be read.** If unset, data is stored unencrypted and the admin sees a warning. |
 | `PUBLIC_URL` | The site's public `https://` address. Passkeys are bound to it, and links in e-mails point to it. |
 | `RESEND_API_KEY`, `MAIL_FROM` | Optional e-mail password recovery through [Resend](https://resend.com). Needs `PUBLIC_URL` too. An API key with sending access, and a sender on a verified domain (e.g. `Show Tracker <noreply@example.com>`). |
+| `TMDB_API_KEY` | Optional. A TMDB “API Read Access Token”; switches on movie search, US release dates and the cinema list. |
 | `RECOVER_ADMIN` | Set to `yes` for one start to remove the admin's passkeys and print an admin password-reset link in the log. |
 | `PORT`, `DATA_DIR` | Default `3000` and `/data`. |
 
@@ -105,7 +110,8 @@ Then open <http://localhost:3000>. Data goes to `./data` unless `DATA_DIR` is se
 - Anime air times are the Japanese broadcast time. Simulcasts usually appear on
   Crunchyroll / HIDIVE shortly after, but some are delayed.
 - Streaming tags are not region-specific.
-- Movies outside of anime are not covered (TVmaze only lists series).
+- Movie data comes from TMDB and release dates are for the US. This product uses the
+  TMDB API but is not endorsed or certified by TMDB.
 - On the public ntfy.sh server, anyone who knows a topic name can read it – use a
   long random topic.
 
