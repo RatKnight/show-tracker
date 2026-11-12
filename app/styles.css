@@ -253,3 +253,10 @@ h2 .today { color: var(--accent); }
 }
 .pair { display: flex; gap: 12px; }
 .pair .field { flex: 1; }
+
+/* ---------- accounts ---------- */
+.linkbox:empty { display: none; }
+.linkbox { margin-top: 12px; }
+.card .list { margin-top: 12px; }
+.card .list .row { background: var(--panel-2); }
+.card .actions { align-items: center; }

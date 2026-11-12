@@ -1,25 +1,27 @@
-// Backups: a portable export of the list, daily snapshots on disk, and an
-// optional weekly copy posted to Discord.
-import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+// Backups: a portable export of one person's list, and daily copies of the
+// whole (encrypted) data file.
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 const KEEP_SNAPSHOTS = 14;
 
 /**
- * Everything needed to rebuild the list. Deliberately leaves out the password,
- * session secret, feed address and alert channel addresses, so the file is safe
- * to keep in a chat channel or cloud drive.
+ * Everything needed to rebuild one person's list. Deliberately leaves out the
+ * password, session keys, feed/share addresses and alert channel addresses, so
+ * the file is safe to keep in a chat channel or cloud drive.
  */
-export function buildBackup(data, now = Date.now()) {
-  const { ntfyUrl, discordWebhook, ...settings } = data.settings;
+export function buildBackup(user, catalog, now = Date.now()) {
+  const { ntfyUrl, discordWebhook, ...settings } = user.settings;
   return {
     app: 'show-tracker',
     version: 1,
     exportedAt: new Date(now).toISOString(),
-    shows: Object.values(data.shows).map((s) => ({ source: s.source, id: s.id, title: s.title, addedAt: s.addedAt })),
-    watched: data.watched,
-    muted: data.muted,
-    dismissed: data.dismissed,
+    shows: Object.entries(user.shows)
+      .filter(([key]) => catalog[key])
+      .map(([key, { addedAt }]) => ({ source: catalog[key].source, id: catalog[key].id, title: catalog[key].title, addedAt })),
+    watched: user.watched,
+    muted: user.muted,
+    dismissed: user.dismissed,
     settings,
   };
 }
@@ -40,13 +42,22 @@ export function readBackup(input) {
   };
 }
 
-/** Write today's snapshot into <dir>/backups and prune old ones. Returns the file name. */
-export function writeSnapshot(dir, data, day, now = Date.now()) {
-  const folder = join(dir, 'backups');
+/**
+ * Copy the data file into <dir>/backups as today's snapshot and prune old ones.
+ * The copy is exactly what is on disk, so it is encrypted whenever the store is.
+ */
+export function writeSnapshot(store, day) {
+  const folder = join(store.dir, 'backups');
   mkdirSync(folder, { recursive: true });
-  const name = `backup-${day}.json`;
-  writeFileSync(join(folder, name), JSON.stringify(buildBackup(data, now)), { mode: 0o600 });
-  const old = readdirSync(folder).filter((f) => /^backup-\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort().slice(0, -KEEP_SNAPSHOTS);
-  for (const f of old) unlinkSync(join(folder, f));
+  const name = `state-${day}.json`;
+  copyFileSync(store.file, join(folder, name));
+  const all = readdirSync(folder);
+  const old = all.filter((f) => /^state-\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort().slice(0, -KEEP_SNAPSHOTS);
+  // Once encryption is on, nothing readable may be left behind: neither the
+  // list exports from before accounts existed, nor snapshots taken without a key.
+  const readable = store.encrypted
+    ? all.filter((f) => /^backup-\d{4}-\d{2}-\d{2}\.json$/.test(f) || (/^state-/.test(f) && f !== name && !readFileSync(join(folder, f), 'utf8').startsWith('{"encrypted":true')))
+    : [];
+  for (const f of new Set([...old, ...readable])) unlinkSync(join(folder, f));
   return name;
 }

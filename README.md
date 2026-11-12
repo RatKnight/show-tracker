@@ -35,27 +35,47 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
 - **Streaming services** – each show is tagged with where it streams. Your services
   (Crunchyroll, HIDIVE and Prime Video by default) are highlighted, and shows that
   are on none of them are flagged.
-- **One password** – the first visit asks you to create it, using a one-time setup
-  code printed in the server log. After that the list is only reachable when signed
-  in. You can change the password, sign other devices out, and replace the calendar
-  feed address under *Settings*.
+- **Accounts** – each person has their own private list, alerts and settings.
+  Nobody can see anyone else's list; an admin sees usernames only. People join
+  through one-time invite links, and can share their list read-only by link if they
+  choose to.
 
 ## Run it
 
 ### Docker (Coolify, or any Docker host)
 
 The repo has a `Dockerfile`. The container listens on port **3000** and stores
-everything in **`/data`** – mount a persistent volume there or the list is lost on
-every redeploy. There are no required environment variables.
+everything in **`/data`** – mount a persistent volume there or the data is lost on
+every redeploy.
 
 ```
 docker build -t show-tracker .
-docker run -d -p 3000:3000 -v show-tracker-data:/data show-tracker
+docker run -d -p 3000:3000 -v show-tracker-data:/data -e DATA_KEY="$(openssl rand -hex 32)" show-tracker
 ```
 
-Put it behind HTTPS (Coolify's proxy does this). On the first visit you are asked
-for the 6-digit setup code from the server log (`No password set yet. Setup code
-for the first visit: …`), so nobody else can claim a fresh install.
+Environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `DATA_KEY` | Encrypts the data file at rest (AES-256-GCM). At least 32 characters. **Keep a copy somewhere safe: without it the data cannot be read.** If unset, data is stored unencrypted and the admin sees a warning. |
+| `RECOVER_ADMIN` | Set to `yes` for one start to print an admin password-reset link in the log. |
+| `PORT`, `DATA_DIR` | Default `3000` and `/data`. |
+
+Put it behind HTTPS (Coolify's proxy does this). On the first visit you create the
+admin account, using the 6-digit setup code from the server log (`No account exists
+yet. Setup code for the first visit: …`), so nobody else can claim a fresh install.
+
+#### How the data is protected
+
+- Passwords are never stored, only salted scrypt hashes.
+- With `DATA_KEY` set, the whole data file – usernames, lists, alert addresses –
+  and its daily snapshots are encrypted on disk. The key lives in the environment,
+  not in the data volume, so a copied volume or backup is unreadable on its own.
+- This protects stored data. It does not hide data from someone who controls the
+  running server, because the server must read lists to check schedules and send
+  alerts.
+- Forgotten passwords are reset with a one-time link created by an admin
+  (*Settings → People*). There is no e-mail on file.
 
 ### Locally
 
@@ -65,8 +85,7 @@ Requires [Node.js](https://nodejs.org) 22 or newer. There is nothing to install.
 npm start
 ```
 
-Then open <http://localhost:3000>. `PORT` and `DATA_DIR` (default `./data`) can be
-set as environment variables.
+Then open <http://localhost:3000>. Data goes to `./data` unless `DATA_DIR` is set.
 
 ## Good to know
 
@@ -76,8 +95,6 @@ set as environment variables.
 - Movies outside of anime are not covered (TVmaze only lists series).
 - On the public ntfy.sh server, anyone who knows a topic name can read it – use a
   long random topic.
-- Forgot the password? Stop the app, remove the `"auth"` entry from
-  `/data/state.json`, start it again and create a new one. Your list is kept.
 
 ## Development
 

@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', watched: [], muted: [] };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], me: { username: '', admin: false } };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -17,6 +17,9 @@ const ui = {
   discover: null, // { sequels, recs, updatedAt }
   seasons: {}, // which -> { season, year, list }
   loading: {},
+  link: null, // { kind: 'invite' | 'reset' | 'share', token, ... } from the page address
+  admin: null, // { users, pendingInvites, encrypted }
+  shared: null, // someone else's shared list
 };
 
 const shows = () => Object.values(state.shows);
@@ -760,6 +763,119 @@ function viewSettings() {
     h(
       'section',
       {},
+      h('h2', {}, 'Account and sharing'),
+      (() => {
+        const out = h('p', { class: 'muted small', role: 'status' });
+        const name = h('input', { type: 'text', id: 'account-name', value: state.me.username, autocomplete: 'username', minlength: 3, maxlength: 24 });
+        const shareUrl = state.shareToken ? `${location.origin}/#share=${state.shareToken}` : '';
+        return h(
+          'div',
+          { class: 'card' },
+          h('label', { class: 'field', for: 'account-name' }, 'Username', name),
+          h(
+            'div',
+            { class: 'actions' },
+            h('button', { class: 'btn', type: 'button', onclick: () => call('PUT', '/api/account', { username: name.value }).then(() => (out.textContent = 'Username saved.'), (e) => (out.textContent = e.message)) }, 'Save username'),
+          ),
+          out,
+          h('p', { class: 'muted' }, 'Your list is private. Nobody else on this site can see it — unless you switch on a share link, which lets anyone holding the link see your shows and their schedule (not your watched marks, alerts or settings).'),
+          h(
+            'div',
+            { class: 'checks' },
+            h('label', {}, h('input', { type: 'checkbox', checked: Boolean(state.shareToken), onchange: (e) => act('POST', '/api/share', { enabled: e.target.checked }) }), 'Share my list with a link'),
+          ),
+          state.shareToken && h('label', { class: 'field', for: 'share-url' }, 'Share link (switch off and on again to replace it)', h('input', { type: 'text', id: 'share-url', readonly: true, value: shareUrl, onfocus: (e) => e.target.select() })),
+        );
+      })(),
+    ),
+    state.me.admin &&
+      h(
+        'section',
+        {},
+        h('h2', {}, 'People (admin)'),
+        (() => {
+          load('admin', async () => (ui.admin = await call('GET', '/api/admin/users')));
+          const a = ui.admin;
+          if (!a) return h('div', { class: 'card' }, h('p', { class: 'muted' }, ui.loading.admin === 'busy' ? 'Loading…' : ui.loading.admin || ''));
+          const out = h('div', { class: 'linkbox', role: 'status' });
+          const showLink = (label, url, note) => {
+            out.replaceChildren(h('label', { class: 'field', for: 'one-time-link' }, label, h('input', { type: 'text', id: 'one-time-link', readonly: true, value: url, onfocus: (e) => e.target.select() })), h('p', { class: 'muted small' }, note));
+            out.querySelector('input').select();
+          };
+          const fail = (e) => out.replaceChildren(h('p', { class: 'error small' }, e.message));
+          return h(
+            'div',
+            { class: 'card' },
+            h('p', { class: a.encrypted ? 'muted' : 'error' }, a.encrypted ? 'Data is encrypted at rest.' : 'Data is NOT encrypted at rest: no DATA_KEY is set on the server.'),
+            h('p', { class: 'muted' }, 'You can see who has an account, but not what is on their lists. New people join through a one-time invite link.'),
+            h(
+              'div',
+              { class: 'list' },
+              a.users.map((p) =>
+                h(
+                  'div',
+                  { class: 'row' },
+                  h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, `Joined ${fmtShortDay.format(p.createdAt)}`)),
+                  h(
+                    'div',
+                    { class: 'side' },
+                    h(
+                      'button',
+                      {
+                        class: 'btn',
+                        type: 'button',
+                        onclick: () =>
+                          call('POST', '/api/admin/reset', { id: p.id }).then((r) => showLink(`Password reset link for ${p.username}`, `${location.origin}/#reset=${r.token}`, 'Works once, for 24 hours. Send it to them privately.'), fail),
+                      },
+                      'Reset link',
+                    ),
+                    p.id !== state.me.id &&
+                      h(
+                        'button',
+                        {
+                          class: 'btn quiet',
+                          type: 'button',
+                          onclick: async () => {
+                            if (!confirm(`Delete ${p.username}’s account and everything in it? This cannot be undone.`)) return;
+                            try {
+                              ui.admin = await call('DELETE', `/api/admin/users?id=${encodeURIComponent(p.id)}`);
+                              render();
+                            } catch (e) {
+                              fail(e);
+                            }
+                          },
+                        },
+                        'Delete',
+                      ),
+                  ),
+                ),
+              ),
+            ),
+            h(
+              'div',
+              { class: 'actions' },
+              h(
+                'button',
+                {
+                  class: 'btn primary',
+                  type: 'button',
+                  onclick: () =>
+                    call('POST', '/api/admin/invites').then((r) => {
+                      ui.admin = { users: r.users, pendingInvites: r.pendingInvites, encrypted: r.encrypted };
+                      showLink('Invite link', `${location.origin}/#invite=${r.token}`, 'Works once, for 7 days. Whoever opens it can create one account.');
+                    }, fail),
+                },
+                'Create an invite link',
+              ),
+              a.pendingInvites > 0 && h('span', { class: 'muted small' }, `${a.pendingInvites} unused invite${a.pendingInvites === 1 ? '' : 's'} outstanding`),
+            ),
+            out,
+          );
+        })(),
+      ),
+    h(
+      'section',
+      {},
       h('h2', {}, 'Security'),
       (() => {
         const cur = h('input', { type: 'password', id: 'pw-current', autocomplete: 'current-password', required: true });
@@ -815,8 +931,7 @@ function viewSettings() {
             type: 'button',
             onclick: async () => {
               await call('POST', '/api/logout').catch(() => {});
-              ui.session = { setup: true, authed: false };
-              render();
+              location.reload();
             },
           },
           'Sign out',
@@ -826,11 +941,33 @@ function viewSettings() {
   ];
 }
 
+/** Forget a one-time link once it has been used or turned out to be dead. */
+function dropLink() {
+  ui.link = null;
+  history.replaceState(null, '', location.pathname);
+}
+
 function viewAuth() {
-  const first = !ui.session.setup;
-  const pw = h('input', { type: 'password', id: 'password', autocomplete: first ? 'new-password' : 'current-password', required: true, minlength: first ? 8 : null });
+  const link = ui.link;
+  // Which of the four forms this is.
+  const mode = link?.kind === 'invite' ? 'invite' : link?.kind === 'reset' ? 'reset' : !ui.session.setup ? 'setup' : 'login';
+  const creating = mode !== 'login';
+  const name = h('input', { type: 'text', id: 'username', autocomplete: 'username', autocapitalize: 'none', spellcheck: 'false', required: true, minlength: 3, maxlength: 24 });
+  const pw = h('input', { type: 'password', id: 'password', autocomplete: creating ? 'new-password' : 'current-password', required: true, minlength: creating ? 8 : null });
   const code = h('input', { type: 'text', id: 'setup-code', inputmode: 'numeric', autocomplete: 'off', required: true });
   const msg = h('p', { class: 'error small', role: 'alert' });
+  const send = {
+    setup: () => call('POST', '/api/setup', { username: name.value, password: pw.value, code: code.value }),
+    login: () => call('POST', '/api/login', { username: name.value, password: pw.value }),
+    invite: () => call('POST', '/api/signup', { token: link.token, username: name.value, password: pw.value }),
+    reset: () => call('POST', '/api/reset', { token: link.token, password: pw.value }),
+  }[mode];
+  const title = { setup: 'Set up Show Tracker', login: 'Sign in', invite: 'Create your account', reset: 'Choose a new password' }[mode];
+  const intro = {
+    setup: 'This is the first visit. Create the admin account that will look after this site.',
+    invite: 'You have been invited. Pick a username and a password of at least 8 characters.',
+    reset: `Setting a new password for ${link?.username || 'your account'}. Every device signed in to it will be signed out.`,
+  }[mode];
   const form = h(
     'form',
     {
@@ -839,7 +976,8 @@ function viewAuth() {
         e.preventDefault();
         msg.textContent = '';
         try {
-          await call('POST', first ? '/api/setup' : '/api/login', first ? { password: pw.value, code: code.value } : { password: pw.value });
+          await send();
+          if (link) dropLink();
           ui.session = { setup: true, authed: true };
           await call('GET', '/api/state');
           await adoptTimeZone();
@@ -849,16 +987,40 @@ function viewAuth() {
         }
       },
     },
-    h('h3', {}, first ? 'Create a password' : 'Sign in'),
-    first && h('p', { class: 'muted' }, 'This is the first visit. Choose the password that will protect your list (at least 8 characters).'),
-    first && h('label', { class: 'field', for: 'setup-code' }, 'Setup code', code),
-    first && h('p', { class: 'muted small' }, 'The 6-digit code is printed in the server log when the app starts (in Coolify: the app’s Logs tab).'),
-    h('label', { class: 'field', for: 'password' }, 'Password', pw),
-    h('button', { class: 'btn primary', type: 'submit' }, first ? 'Create password' : 'Sign in'),
+    h('h3', {}, title),
+    intro && h('p', { class: 'muted' }, intro),
+    mode === 'setup' && h('label', { class: 'field', for: 'setup-code' }, 'Setup code', code),
+    mode === 'setup' && h('p', { class: 'muted small' }, 'The 6-digit code is printed in the server log when the app starts (in Coolify: the app’s Logs tab).'),
+    mode !== 'reset' && h('label', { class: 'field', for: 'username' }, 'Username', name),
+    h('label', { class: 'field', for: 'password' }, creating ? 'New password' : 'Password', pw),
+    h('button', { class: 'btn primary', type: 'submit' }, { setup: 'Create admin account', login: 'Sign in', invite: 'Create account', reset: 'Save new password' }[mode]),
+    mode === 'login' && h('p', { class: 'muted small' }, 'Forgot your password? Ask the person who runs this site for a reset link.'),
     msg,
   );
-  setTimeout(() => (first ? code : pw).focus());
+  setTimeout(() => (mode === 'setup' ? code : mode === 'reset' ? pw : name).focus());
   return form;
+}
+
+/** Read-only page for a list someone chose to share. */
+function viewShared() {
+  const { username, list } = ui.shared;
+  const now = Date.now();
+  const sorted = [...list].sort((a, b) => (nextEpisode(a, now)?.airsAt ?? Infinity) - (nextEpisode(b, now)?.airsAt ?? Infinity) || a.title.localeCompare(b.title));
+  return [
+    h('section', {}, h('h2', {}, `${username}’s list · ${list.length} show${list.length === 1 ? '' : 's'}`)),
+    list.length
+      ? h(
+          'div',
+          { class: 'list' },
+          sorted.map((show) => {
+            const next = nextEpisode(show, now);
+            const when = next ? `Next: ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`}` : show.note || 'No upcoming episode announced';
+            return h('div', { class: 'row' }, thumb(show), h('div', { class: 'body' }, h('div', { class: 'title' }, link(show.url, show.title)), h('div', { class: 'sub' }, `${show.status} · ${when}`)), h('div', { class: 'side' }, badges(show, { kind: true })));
+          }),
+        )
+      : empty('Nothing on this list yet', ''),
+    h('p', { class: 'muted small' }, h('a', { href: '/' }, 'Open Show Tracker')),
+  ];
 }
 
 const TABS = [
@@ -877,8 +1039,16 @@ const $ = (id) => document.getElementById(id);
 function render() {
   const authed = Boolean(ui.session?.authed);
   document.body.classList.toggle('signed-out', !authed);
-  if (!authed) {
+  if (ui.shared) {
+    document.body.classList.add('signed-out');
     $('banner').hidden = true;
+    $('view').replaceChildren(...viewShared());
+    return;
+  }
+  if (!authed || ui.link) {
+    document.body.classList.add('signed-out');
+    $('banner').hidden = !ui.error;
+    $('banner').textContent = ui.error || '';
     $('view').replaceChildren(...(ui.session ? [viewAuth()] : [empty('Loading…', '')]));
     return;
   }
@@ -1032,13 +1202,25 @@ async function adoptTimeZone() {
 
 async function boot() {
   render();
+  const hash = /^#(invite|reset|share)=([\w-]{8,})$/.exec(location.hash);
   try {
+    if (hash?.[1] === 'share') {
+      ui.shared = await call('GET', `/api/shared?token=${hash[2]}`);
+      ui.session = { setup: true, authed: false };
+      return render();
+    }
     ui.session = await call('GET', '/api/session');
-    if (ui.session.authed) await call('GET', '/api/state');
-    await adoptTimeZone();
+    if (hash) {
+      const info = await call('GET', `/api/link?kind=${hash[1]}&token=${hash[2]}`);
+      ui.link = { ...info, token: hash[2] };
+    } else if (ui.session.authed) {
+      await call('GET', '/api/state');
+      await adoptTimeZone();
+    }
   } catch (e) {
-    ui.session = { setup: true, authed: false };
+    ui.session ||= { setup: true, authed: false };
     ui.error = e.message;
+    if (hash) history.replaceState(null, '', location.pathname);
   }
   render();
 }
