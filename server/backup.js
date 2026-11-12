@@ -20,6 +20,7 @@ export function buildBackup(user, catalog, now = Date.now()) {
       .filter(([key]) => catalog[key])
       .map(([key, { addedAt }]) => ({ source: catalog[key].source, id: catalog[key].id, title: catalog[key].title, addedAt })),
     watched: user.watched,
+    progress: user.progress,
     muted: user.muted,
     dismissed: user.dismissed,
     settings,
@@ -36,6 +37,11 @@ export function readBackup(input) {
       .slice(0, 1000)
       .map((s) => ({ source: s.source, id: s.id, addedAt: Number.isFinite(s.addedAt) ? s.addedAt : null })),
     watched: strings(input.watched, 5000),
+    progress: Object.fromEntries(
+      Object.entries(input.progress && typeof input.progress === 'object' ? input.progress : {})
+        .filter(([k, n]) => /^anilist:\d+$/.test(k) && Number.isInteger(n) && n > 0 && n <= 10000)
+        .slice(0, 1000),
+    ),
     muted: strings(input.muted, 1000),
     dismissed: strings(input.dismissed, 2000),
     settings: input.settings && typeof input.settings === 'object' ? input.settings : {},

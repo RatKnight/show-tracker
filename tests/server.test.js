@@ -472,7 +472,7 @@ test('backup leaves out secrets; snapshots copy the data file and are pruned', a
   for (const secret of [user.auth.hash, store.data.secret, user.feedToken, user.sessionKey, 'private-topic', 'webhooks/1/abc']) assert.ok(!text.includes(secret), `backup must not contain ${secret}`);
   assert.deepEqual(readBackup(JSON.parse(text)).shows, [{ source: 'anilist', id: 1, addedAt: user.shows['anilist:1'].addedAt }]);
   assert.throws(() => readBackup({ shows: [] }), /not a Show Tracker backup/);
-  assert.deepEqual(readBackup({ app: 'show-tracker', shows: [{ source: 'evil', id: 1 }, null], watched: [1, 'ok'] }), { shows: [], watched: ['ok'], muted: [], dismissed: [], settings: {} });
+  assert.deepEqual(readBackup({ app: 'show-tracker', shows: [{ source: 'evil', id: 1 }, null], watched: [1, 'ok'] }), { shows: [], watched: ['ok'], progress: {}, muted: [], dismissed: [], settings: {} });
 
   for (let i = 1; i <= 16; i++) writeSnapshot(store, `2026-11-${String(i).padStart(2, '0')}`);
   const snaps = readdirSync(join(dir, 'backups')).sort();
@@ -588,6 +588,13 @@ test('http: setup, sign-in and the single-user features', async (t) => {
   assert.deepEqual((await req('POST', '/api/watched', { ids: ['anilist:5:1', 'anilist:5:2'] })).body.watched, ['anilist:5:1', 'anilist:5:2']);
   assert.deepEqual((await req('POST', '/api/watched', { ids: ['anilist:5:1'], watched: false })).body.watched, ['anilist:5:2']);
   assert.equal((await req('POST', '/api/watched', { ids: 'nope' })).status, 400);
+  // "Caught up" covers every episode up to a number and absorbs single marks below it.
+  assert.equal((await req('POST', '/api/progress', { key: 'anilist:404', through: 3 })).status, 400);
+  assert.equal((await req('POST', '/api/progress', { key: 'anilist:5', through: -1 })).status, 400);
+  const caught = (await req('POST', '/api/progress', { key: 'anilist:5', through: 2 })).body;
+  assert.deepEqual([caught.progress, caught.watched], [{ 'anilist:5': 2 }, []]);
+  assert.deepEqual((await req('POST', '/api/progress', { key: 'anilist:5', through: 0 })).body.progress, {});
+  await req('POST', '/api/progress', { key: 'anilist:5', through: 2 });
   assert.deepEqual((await req('POST', '/api/shows/mute', { key: 'anilist:5' })).body.muted, ['anilist:5']);
   assert.equal((await req('POST', '/api/shows/mute', { key: 'anilist:404' })).status, 400);
 
@@ -1160,4 +1167,121 @@ test('http: access tokens and the extension endpoint', async (t) => {
   // Removing the token cuts the extension off.
   assert.deepEqual((await ann.req('DELETE', `/api/tokens?id=${made.me.apiTokens[0].id}`)).body.me.apiTokens, []);
   assert.equal((await ext('GET', '/api/ext/ping')).status, 401);
+});
+
+// ---------------------------------------------------------------- operations
+
+test('weekly backup e-mail: encrypted file to admins with an address, never unencrypted', async () => {
+  const mk = (dataKey) => {
+    const clock = { t: Date.UTC(2026, 10, 12, 12) };
+    const outbox = [];
+    const store = openStore(tmp(), dataKey ? { dataKey } : {});
+    const admin = makeUser({ username: 'ann', admin: true, email: 'ann@example.com' });
+    const friend = makeUser({ username: 'bob', email: 'bob@example.com' });
+    store.data.users[admin.id] = admin;
+    store.data.users[friend.id] = friend;
+    const mailer = { enabled: true, send: async (m) => void outbox.push(m) };
+    const tracker = createTracker({ store, sources: fakeSources(clock), send: async () => [], mailer, now: () => clock.t });
+    return { clock, outbox, store, admin, tracker };
+  };
+
+  const { clock, outbox, store, admin, tracker } = mk('k'.repeat(40));
+  await tracker.emailBackup();
+  await tracker.emailBackup();
+  assert.equal(outbox.length, 1, 'once, to the admin only');
+  assert.equal(outbox[0].to, 'ann@example.com');
+  assert.equal(outbox[0].attachments[0].filename, 'show-tracker-state-2026-11-12.json');
+  const attached = outbox[0].attachments[0].content.toString();
+  assert.ok(attached.startsWith('{"encrypted":true'));
+  assert.ok(!attached.includes('ann@example.com') && !attached.includes('bob'), 'nothing readable in the attachment');
+  clock.t += 8 * DAY;
+  await tracker.emailBackup();
+  assert.equal(outbox.length, 2, 'again a week later');
+  store.data.site.backupEmail = false;
+  clock.t += 8 * DAY;
+  await tracker.emailBackup();
+  assert.equal(outbox.length, 2, 'switched off');
+  store.data.site.backupEmail = true;
+  admin.email = '';
+  await tracker.emailBackup();
+  assert.equal(outbox.length, 2, 'no confirmed address, no mail');
+
+  const plain = mk('');
+  await plain.tracker.emailBackup();
+  assert.equal(plain.outbox.length, 0, 'an unencrypted data file is never e-mailed');
+});
+
+test('admins are told when schedule updates fail for hours, and when they recover', async () => {
+  const clock = { t: Date.UTC(2026, 10, 12, 12) };
+  const pushes = [];
+  const mails = [];
+  const store = openStore(tmp());
+  const sources = fakeSources(clock);
+  const admin = makeUser({ username: 'ann', admin: true, email: 'ann@example.com' });
+  const friend = makeUser({ username: 'bob' });
+  store.data.users[admin.id] = admin;
+  store.data.users[friend.id] = friend;
+  const tracker = createTracker({ store, sources, send: async (settings, m) => {
+      // Episode alerts go out too as the clock moves; only health messages are of interest here.
+      if (m[0].title.startsWith('Show Tracker:')) pushes.push([settings === admin.settings ? 'admin' : 'other', m[0].title]);
+      return [];
+    },
+    mailer: { enabled: true, send: async (m) => void mails.push(m.subject) },
+    now: () => clock.t,
+  });
+  await tracker.addShow(friend, 'anilist', 5);
+  await tracker.refresh();
+  await tracker.checkHealth();
+  assert.equal(pushes.length, 0, 'healthy: silence');
+
+  sources.fail = true;
+  clock.t += 4 * 60 * 60 * 1000;
+  await tracker.refresh();
+  await tracker.checkHealth();
+  await tracker.checkHealth();
+  assert.deepEqual(pushes, [['admin', 'Show Tracker: schedule updates are failing']], 'once, to the admin only');
+  assert.deepEqual(mails, ['Show Tracker: schedule updates are failing']);
+
+  sources.fail = false;
+  await tracker.refresh();
+  await tracker.checkHealth();
+  assert.equal(pushes.at(-1)[1], 'Show Tracker: schedule updates are working again');
+  store.data.site.healthAlerts = false;
+  sources.fail = true;
+  clock.t += 5 * 60 * 60 * 1000;
+  await tracker.checkHealth();
+  assert.equal(pushes.length, 2, 'switched off');
+});
+
+test('http: account owners are e-mailed when an admin acts on their account', async (t) => {
+  const outbox = [];
+  const mailer = { enabled: true, link: (k, tok) => `https://shows.example/#${k}=${tok}`, send: async (m) => void outbox.push(m) };
+  const { setupCode, store, client } = await serve(t, { mailer });
+  const ann = client('198.51.100.1');
+  const bob = client('198.51.100.2');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  const invite = (await ann.req('POST', '/api/admin/invites', { note: 'bob' })).body.token;
+  await bob.req('POST', '/api/signup', { token: invite, username: 'bob', password: 'password-bob' });
+  const bobUser = Object.values(store.data.users).find((x) => x.username === 'bob');
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  await ann.req('POST', '/api/admin/reset', { id: bobUser.id });
+  await settle();
+  assert.equal(outbox.length, 0, 'no address on file: nothing to send');
+
+  bobUser.email = 'bob@example.com';
+  await ann.req('POST', '/api/admin/reset', { id: bobUser.id });
+  await ann.req('POST', '/api/admin/mfa/clear', { id: bobUser.id });
+  await settle();
+  assert.deepEqual(outbox.map((m) => m.to), ['bob@example.com', 'bob@example.com']);
+  assert.match(outbox[0].text, /admin \(ann\) created a password reset link for your account/);
+  assert.match(outbox[1].text, /removed the passkeys and recovery codes/);
+  assert.ok(!outbox[0].text.includes('#reset='), 'the reset link itself is not mailed');
+  await ann.req('DELETE', `/api/admin/users?id=${bobUser.id}`);
+  await settle();
+  assert.match(outbox[2].text, /deleted your account/);
+
+  // Site settings are admin-only and take only the known switches.
+  const site = (await ann.req('PUT', '/api/admin/site', { backupEmail: false, healthAlerts: 'yes', other: 1 })).body.site;
+  assert.deepEqual(site, { backupEmail: false, healthAlerts: true });
 });

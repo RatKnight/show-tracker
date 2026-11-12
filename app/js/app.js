@@ -1,9 +1,9 @@
-import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGrid, formatCountdown } from './core.js';
+import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGrid, formatCountdown, isWatched, watchState } from './core.js';
 
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [] }, mail: false, movies: false };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], progress: {}, muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [] }, mail: false, movies: false };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -152,8 +152,11 @@ function thumb(show) {
   return src ? h('img', { class: 'thumb', src, alt: '', loading: 'lazy' }) : h('div', { class: 'thumb' });
 }
 
+/** Has the signed-in user watched this episode (marked singly, or covered by "caught up")? */
+const seenEp = (show, ep) => isWatched(show, ep, new Set(state.watched), state.progress[show.key] || 0);
+
 function episodeRow({ show, ep }, { showDate = false, unread = false, watch = false } = {}) {
-  const seen = watch && state.watched.includes(ep.id);
+  const seen = watch && seenEp(show, ep);
   const now = Date.now();
   const sub = [ep.label, ep.name && ep.name !== ep.label ? `· ${ep.name}` : null].filter(Boolean).join(' ');
   return h(
@@ -196,7 +199,7 @@ function viewUpcoming() {
   const upcoming = episodesBetween(shows(), now, now + 60 * DAY);
   const recent = episodesBetween(shows(), now - 14 * DAY, now).reverse();
   // "To watch" counts what aired since you started tracking the show.
-  const toWatch = recent.filter(({ show, ep }) => ep.airsAt > (show.addedAt || 0) && !state.watched.includes(ep.id));
+  const toWatch = recent.filter(({ show, ep }) => ep.airsAt > (show.addedAt || 0) && !seenEp(show, ep));
 
   const out = [];
   if (!upcoming.length) {
@@ -508,6 +511,75 @@ function viewDiscover() {
   const status = ui.loading[`season-${which}`];
   if (!data) return [...out, empty(status === 'busy' ? 'Loading the season…' : 'Could not load', status === 'busy' ? '' : status || '')];
   out.push(h('section', {}, h('h2', {}, `${SEASON_NAMES[data.season]} ${data.year} · most popular first`), tiles(data.list)));
+  return out;
+}
+
+// ---- Watch next
+
+function viewWatchNext() {
+  const watched = new Set(state.watched);
+  const now = Date.now();
+  const rows = shows()
+    .map((show) => ({ show, st: watchState(show, watched, state.progress[show.key] || 0, now) }))
+    .filter((x) => x.st && x.st.behind > 0);
+  if (!shows().length) return empty('Nothing tracked yet', 'Add shows with the search box above.');
+  if (!rows.length) return empty('All caught up', 'Nothing you track has an episode waiting. Films are not listed here.');
+
+  const caughtUp = (show, st) => {
+    if (show.source === 'anilist') return act('POST', '/api/progress', { key: show.key, through: show.aired });
+    // Other sources: mark each recent episode.
+    return act('POST', '/api/watched', { ids: show.episodes.filter((e) => e.airsAt <= now).map((e) => e.id) });
+  };
+  const row = ({ show, st }) => {
+    const mine = myStreams(show, state.settings.services)[0];
+    return h(
+      'div',
+      { class: 'row' },
+      thumb(show),
+      h(
+        'div',
+        { class: 'body' },
+        h('div', { class: 'title' }, link(show.url, show.title)),
+        h('div', { class: 'sub' }, `Next: ${st.next.label} · ${st.behind} to watch${show.source === 'anilist' && show.total ? ` of ${show.total}` : ''}`),
+      ),
+      h(
+        'div',
+        { class: 'side' },
+        mine && link(mine.url, `Watch on ${mine.name}`, `badge mine ${mine.id}`),
+        h('button', { class: 'btn', type: 'button', onclick: () => act('POST', '/api/watched', { ids: [st.next.id] }) }, `Watched ${st.next.label}`),
+        st.behind > 1 &&
+          h(
+            'button',
+            {
+              class: 'btn quiet',
+              type: 'button',
+              title: 'Mark every episode that is out as watched',
+              onclick: () => {
+                if (confirm(`Mark all ${st.behind} episodes of "${show.title}" as watched?`)) caughtUp(show, st);
+              },
+            },
+            'Caught up',
+          ),
+      ),
+    );
+  };
+  // Fewest left first: the shows closest to being caught up lead.
+  const byLeft = (a, b) => a.st.behind - b.st.behind || a.show.title.localeCompare(b.show.title);
+  const going = rows.filter((x) => x.st.started).sort(byLeft);
+  const fresh = rows.filter((x) => !x.st.started).sort(byLeft);
+  const out = [];
+  if (going.length) out.push(h('section', {}, h('h2', {}, `Continue watching · ${going.length}`), h('div', { class: 'list' }, going.map(row))));
+  if (fresh.length) {
+    out.push(
+      h(
+        'section',
+        {},
+        h('h2', {}, `Not started · ${fresh.length}`),
+        going.length ? h('details', {}, h('summary', {}, 'Show these'), h('div', { class: 'list' }, fresh.map(row))) : h('div', { class: 'list' }, fresh.map(row)),
+      ),
+    );
+  }
+  out.push(h('p', { class: 'muted small' }, 'Counts cover episodes that have aired. For TV shows only the last 30 days are known. The browser extension fills in what you watch on Crunchyroll and HIDIVE.'));
   return out;
 }
 
@@ -1245,7 +1317,55 @@ function viewProfile() {
 
 /** Site administration. Only reachable by admins; the server enforces it too. */
 function viewAdmin() {
+  const a = ui.admin;
+  const site = a?.site || {};
+  const toggle = (key, label) =>
+    h(
+      'label',
+      {},
+      h('input', {
+        type: 'checkbox',
+        checked: site[key] !== false,
+        onchange: async (e) => {
+          try {
+            ui.admin = await call('PUT', '/api/admin/site', { [key]: e.target.checked });
+            ui.error = null;
+          } catch (err) {
+            ui.error = err.message;
+          }
+          render();
+        },
+      }),
+      label,
+    );
+  const canMail = a?.mail && state.me.email;
   return [
+    a &&
+      h(
+        'section',
+        {},
+        h('h2', {}, 'Site'),
+        h(
+          'div',
+          { class: 'card' },
+          h('p', { class: a.encrypted ? 'muted' : 'error' }, a.encrypted ? 'Data is encrypted at rest.' : 'Data is NOT encrypted at rest: no DATA_KEY is set on the server.'),
+          h('p', { class: 'muted' }, `E-mail is ${a.mail ? 'on' : 'off'} · movies are ${a.movies ? 'on' : 'off'}.`),
+          h('div', { class: 'checks' }, toggle('backupEmail', 'E-mail me the encrypted data file every week, as an off-site backup')),
+          h(
+            'p',
+            { class: 'muted small' },
+            !a.encrypted
+              ? 'Not sent while data is unencrypted.'
+              : !canMail
+                ? 'Needs e-mail to be on and a confirmed address on your profile.'
+                : a.lastBackupEmail
+                  ? `Last sent ${fmtShortDay.format(a.lastBackupEmail)}. The file is useless without the DATA_KEY: keep that safe as well.`
+                  : 'The first one goes out within a minute or two. The file is useless without the DATA_KEY: keep that safe as well.',
+          ),
+          h('div', { class: 'checks' }, toggle('healthAlerts', 'Alert me when schedule updates have been failing for 3 hours')),
+          h('p', { class: 'muted small' }, 'Sent through your own alert channels, and by e-mail when you have an address on file.'),
+        ),
+      ),
     h(
       'section',
       {},
@@ -1265,7 +1385,6 @@ function viewAdmin() {
         return h(
           'div',
           { class: 'card' },
-          h('p', { class: a.encrypted ? 'muted' : 'error' }, a.encrypted ? 'Data is encrypted at rest.' : 'Data is NOT encrypted at rest: no DATA_KEY is set on the server.'),
           h('p', { class: 'muted' }, a.mail ? 'E-mail recovery is on: people can add an address and reset their own password.' : 'E-mail recovery is off (the mail settings are missing on the server). You can still hand out reset links below.'),
           h('p', { class: 'muted' }, 'You can see who has an account, but not what is on their lists. New people join through a one-time invite link.'),
           h(
@@ -1768,6 +1887,7 @@ function viewShared() {
 
 const TABS = [
   ['upcoming', 'Upcoming', viewUpcoming],
+  ['next', 'Watch next', viewWatchNext],
   ['calendar', 'Calendar', viewCalendar],
   ['discover', 'Discover', viewDiscover],
   ['shows', 'My shows', viewShows],

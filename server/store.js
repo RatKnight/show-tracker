@@ -43,6 +43,7 @@ export function makeUser(fields) {
     alerts: [],
     alerted: [],
     watched: [],
+    progress: {}, // anime show key -> every episode up to this number is watched
     muted: [],
     dismissed: [],
     outbox: [],
@@ -156,7 +157,10 @@ export function openStore(dir, { dataKey = '' } = {}) {
     lastRefresh: 0,
     lastError: null,
     lastSnapshotDay: null,
+    lastBackupEmail: 0,
+    staleAlerted: false, // admins have been told that schedule updates are failing
     ...saved,
+    site: { backupEmail: true, healthAlerts: true, ...saved.site },
   };
   for (const [id, u] of Object.entries(data.users)) data.users[id] = makeUser(u);
 

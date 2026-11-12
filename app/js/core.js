@@ -115,10 +115,51 @@ export function normalizeAnilist(media, schedule, now = Date.now()) {
     format: ANILIST_FORMAT[media.format] || null,
     genres: (media.genres || []).slice(0, 4),
     score: media.averageScore || null,
+    // How far the season has got: the number of the latest episode out, and how many there will be.
+    aired: latestAired(media, schedule, now),
+    total: media.episodes || null,
     note,
     streams,
     episodes,
   };
+}
+
+function latestAired(media, schedule, now) {
+  if (media.nextAiringEpisode?.episode) return Math.max(0, media.nextAiringEpisode.episode - 1);
+  if (media.status === 'FINISHED') return media.episodes || null;
+  const out = schedule.filter((n) => n.airingAt * 1000 <= now).map((n) => n.episode);
+  return out.length ? Math.max(...out) : media.status === 'NOT_YET_RELEASED' ? 0 : null;
+}
+
+/** Has this episode been watched? `watched` is a Set of ids, `through` the "watched up to" number for the show. */
+export function isWatched(show, ep, watched, through = 0) {
+  if (watched.has(ep.id)) return true;
+  const n = show.source === 'anilist' ? Number(ep.id.slice(show.key.length + 1)) : NaN;
+  return Number.isInteger(n) && n <= through;
+}
+
+/**
+ * Where the viewer stands with a show: { behind, next: { id, label } | null, started }.
+ * null for things without episodes to catch up on (films, or anime whose progress is unknown).
+ */
+export function watchState(show, watched, through = 0, now = Date.now()) {
+  if (show.kind === 'Movie') return null;
+  if (show.source === 'anilist') {
+    if (!Number.isInteger(show.aired)) return null;
+    let behind = 0;
+    let next = null;
+    for (let n = through + 1; n <= show.aired; n++) {
+      if (watched.has(`${show.key}:${n}`)) continue;
+      behind++;
+      next ??= { id: `${show.key}:${n}`, label: `Episode ${n}` };
+    }
+    const started = through > 0 || [...watched].some((id) => id.startsWith(`${show.key}:`));
+    return { behind, next, started };
+  }
+  // Other sources only keep recent episodes, so "behind" means recent ones not watched.
+  const out = show.episodes.filter((e) => e.airsAt <= now);
+  const unwatched = out.filter((e) => !watched.has(e.id));
+  return { behind: unwatched.length, next: unwatched[0] ? { id: unwatched[0].id, label: unwatched[0].label } : null, started: out.length > unwatched.length };
 }
 
 /** Which anime season a date falls in, and the one after it. */
