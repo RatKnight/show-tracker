@@ -212,6 +212,9 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     return {
       sequels: d.sequels.filter((s) => !hidden.has(s.key)),
       recs: d.recs.filter((s) => !hidden.has(s.key)),
+      // Shows the browser extension saw on a streaming site that are not tracked.
+      seen: tracker.seenSuggestions(u),
+      seenPending: tracker.seenPending(u),
       updatedAt: d.updatedAt,
     };
   };
@@ -272,7 +275,16 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         const result = tracker.reportWatched(owner, items.map((i) => ({ series: i.series, season: i.season ?? null, episode: i.episode })));
         // Some shows still need their seasons looked up: start now instead of at the next minute.
         if (result.pending) tracker.fillFranchises(6).catch((e) => console.error('Franchise lookup failed:', e.message));
+        if (result.suggested) tracker.resolveSeen(owner, 4).catch((e) => console.error('Lookup failed:', e.message));
         return reply(200, result);
+      }
+      // Shows on a streaming site's watchlist: offered in Discover, never added silently.
+      if (route === 'POST /api/ext/seen') {
+        const { provider, series } = await readJson(req, 256 * 1024);
+        if (!['crunchyroll', 'hidive'].includes(provider) || !Array.isArray(series) || series.length > 1000 || !series.every((t) => typeof t === 'string' && t.length <= 200)) throw new HttpError(400, 'Bad show list.');
+        const suggested = tracker.noteSeen(owner, series, provider, 'watchlist');
+        if (suggested) tracker.resolveSeen(owner, 4).catch((e) => console.error('Lookup failed:', e.message));
+        return reply(200, { received: series.length, suggested, alreadyTracked: series.length - suggested });
       }
       throw new HttpError(404, 'Not found.');
     }

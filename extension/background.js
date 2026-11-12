@@ -29,7 +29,28 @@ async function report(items) {
   return body;
 }
 
+/** Names of shows on a streaming site's watchlist, to be offered in Discover. */
+async function reportSeen(series) {
+  const { site, token } = await api.storage.local.get(['site', 'token']);
+  if (!site || !token) return { error: 'not-configured' };
+  try {
+    const res = await fetch(`${site}/api/ext/seen`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'crunchyroll', series }),
+    });
+    const body = await res.json().catch(() => ({}));
+    return res.ok ? body : { error: body.error || `your Show Tracker replied ${res.status}.` };
+  } catch {
+    return { error: 'could not reach your Show Tracker. Check the address in the extension settings.' };
+  }
+}
+
 api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === 'seen' && Array.isArray(message.series)) {
+    reportSeen(message.series).then(sendResponse, (e) => sendResponse({ error: e.message }));
+    return true;
+  }
   if (message?.type !== 'watched' || !Array.isArray(message.items)) return false;
   report(message.items).then(sendResponse, (e) => sendResponse({ error: e.message }));
   return true; // the reply comes later

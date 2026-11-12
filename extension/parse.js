@@ -32,3 +32,25 @@ function parseCrunchyrollHistory(root) {
   }
   return items;
 }
+
+// Reads Crunchyroll's watchlist page: just the names of the shows on it.
+//
+// Written without a saved copy of the page to check against, so it tries the
+// card layout first and then falls back to any link to a series page.
+/* exported parseCrunchyrollWatchlist */
+function parseCrunchyrollWatchlist(root) {
+  const text = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
+  const names = new Set();
+  for (const card of root.querySelectorAll('[class*="watchlist-card--"], [class*="watchlist-card "]')) {
+    const name = text(card.querySelector('[class*="watchlist-card-title"]')) || text(card.querySelector('h4, h3'));
+    if (name) names.add(name);
+  }
+  if (!names.size) {
+    const scope = root.querySelector('main, [class*="watchlist"], [class*="erc-my-lists"]') || root;
+    for (const a of scope.querySelectorAll('a[href*="/series/"]')) {
+      const name = a.getAttribute('title') || text(a);
+      if (name && name.length <= 200) names.add(name);
+    }
+  }
+  return [...names];
+}

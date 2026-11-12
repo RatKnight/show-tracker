@@ -28,4 +28,5 @@ api.storage.local.get(['site', 'token', 'last']).then(({ site, token, last }) =>
 });
 
 document.getElementById('history').addEventListener('click', () => api.tabs.create({ url: 'https://www.crunchyroll.com/history' }));
+document.getElementById('watchlist').addEventListener('click', () => api.tabs.create({ url: 'https://www.crunchyroll.com/watchlist' }));
 document.getElementById('settings').addEventListener('click', () => api.runtime.openOptionsPage());

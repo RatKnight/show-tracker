@@ -7,7 +7,7 @@ import { collectAlerts, myStreams } from '../app/js/core.js';
 import { computeDiscover, buildSeries } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
 import { buildBackup, writeSnapshot } from './backup.js';
-import { matchEpisode } from './extmatch.js';
+import { matchEpisode, normTitle, sameSeries } from './extmatch.js';
 
 const MAX_ALERTS = 100;
 export const REFRESH_EVERY = 30 * 60 * 1000;
@@ -93,8 +93,69 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       u.watched = [...watched].slice(-5000);
       store.save();
     }
-    return { received: items.length, matched, added, unmatched: [...unmatched].map(([series, count]) => ({ series, count })), pending: franchisePending(u) };
+    // Series that are not on the list at all become suggestions in Discover.
+    // (Not while season lookups are outstanding: a later season of a tracked show
+    // would look like a different, untracked series.)
+    const suggested = franchisePending(u) ? 0 : noteSeen(u, [...unmatched.keys()], 'crunchyroll', 'history');
+    return { received: items.length, matched, added, unmatched: [...unmatched].map(([series, count]) => ({ series, count })), pending: franchisePending(u), suggested };
   }
+
+  /** Does the user already track this series, in any season? */
+  function tracksSeries(u, title) {
+    const want = normTitle(title);
+    return showsOf(u).some((s) => [s.title, s.altTitle, data.franchise[s.key]?.root, u.discover?.series?.[s.key]?.title].some((t) => sameSeries(normTitle(t), want)));
+  }
+
+  /**
+   * Remember shows seen on a streaming site (watched, or on a watchlist) that are
+   * not tracked, so Discover can offer them. Returns how many were new.
+   */
+  function noteSeen(u, titles, provider, from) {
+    let fresh = 0;
+    for (const title of titles) {
+      const key = normTitle(title);
+      if (!key || key.length > 120 || tracksSeries(u, title)) continue;
+      const known = u.extSeen[key];
+      // A watchlist entry outranks "watched once": it says the user wants it.
+      if (known && (known.from === 'watchlist' || from === 'history')) continue;
+      if (!known) fresh++;
+      u.extSeen[key] = { ...(known || { tried: false, show: null }), title: String(title).slice(0, 200), provider, from, at: now() };
+    }
+    // Keep the newest 300.
+    const keys = Object.keys(u.extSeen);
+    if (keys.length > 300) for (const k of keys.sort((a, b) => u.extSeen[a].at - u.extSeen[b].at).slice(0, keys.length - 300)) delete u.extSeen[k];
+    if (fresh) store.save();
+    return fresh;
+  }
+
+  /** Find the anime each remembered title refers to. A few per call (one search each). */
+  async function resolveSeen(u, limit = 2) {
+    const todo = Object.entries(u.extSeen).filter(([, e]) => !e.tried).slice(0, limit);
+    for (const [key, entry] of todo) {
+      entry.tried = true;
+      try {
+        const found = await sources.searchAnime(entry.title);
+        // Only an actual title match counts; a loosely related search hit would be a wrong suggestion.
+        entry.show = found.find((s) => [s.title, s.altTitle].some((t) => sameSeries(normTitle(t), key))) || null;
+      } catch (e) {
+        entry.tried = false; // try again later
+        console.error(`Lookup failed for ${entry.title}:`, e.message);
+        break;
+      }
+    }
+    if (todo.length) store.save();
+    return todo.length;
+  }
+
+  /** Suggestions from streaming sites that are still worth showing. */
+  function seenSuggestions(u) {
+    const hidden = new Set([...Object.keys(u.shows), ...u.dismissed]);
+    return Object.values(u.extSeen)
+      .filter((e) => e.show && !hidden.has(e.show.key) && !tracksSeries(u, e.title))
+      .sort((a, b) => (b.from === 'watchlist') - (a.from === 'watchlist') || b.at - a.at)
+      .map((e) => ({ ...e.show, provider: e.provider, from: e.from }));
+  }
+  const seenPending = (u) => Object.values(u.extSeen).filter((e) => !e.tried).length;
 
   /** What to say when something comes out: an episode, or a movie's release event. */
   const releaseText = (ep, where) => {
@@ -395,6 +456,10 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
   return {
     showsOf,
     reportWatched,
+    noteSeen,
+    resolveSeen,
+    seenSuggestions,
+    seenPending,
     fillFranchises,
     refreshCinema,
     cinema: () => cinema,
@@ -449,6 +514,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
         await checkReminders(u);
         // Releases anything held back by quiet hours or waiting for the digest.
         await flush(u);
+        await resolveSeen(u).catch((e) => console.error('Lookup failed:', e.message));
         // Suggestions change slowly: rebuild twice a day, retrying hourly on failure.
         const discoverStale = now() - (u.discover?.updatedAt || 0) > DISCOVER_EVERY;
         if (discoverStale && now() - (discoverAttempt.get(u.id) || 0) > 60 * 60 * 1000) {

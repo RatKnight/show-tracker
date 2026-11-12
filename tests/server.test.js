@@ -1079,7 +1079,7 @@ test('matchEpisode translates a streaming site\'s numbering to tracked episodes'
 });
 
 test('http: access tokens and the extension endpoint', async (t) => {
-  const { setupCode, sources, tracker, client, base } = await serve(t);
+  const { setupCode, sources, tracker, store, client, base } = await serve(t);
   const ann = client('198.51.100.1');
   await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
   sources.franchises[4] = { root: 'Show 1', offset: 37, index: 4, count: 13 };
@@ -1099,6 +1099,8 @@ test('http: access tokens and the extension endpoint', async (t) => {
   assert.equal((await ext('GET', '/api/state')).status, 401, 'a token opens only the extension routes');
   assert.equal((await ext('POST', '/api/shows', { source: 'anilist', id: 9 })).status, 403, 'and cannot act as the session');
 
+  // What the tracker's own title search will answer when it looks suggestions up.
+  sources.searchAnime = async (q) => (q === 'Unknown Thing' ? [fakeShow(70, { t: Date.now() }, { title: 'Unknown Thing' })] : q === 'Wishlisted' ? [fakeShow(71, { t: Date.now() }, { title: 'Wishlisted Season 2' }), fakeShow(72, { t: Date.now() }, { title: 'Wishlisted' })] : [fakeShow(73, { t: Date.now() }, { title: 'Something Else Entirely' })]);
   const items = [
     { series: 'Show 1', season: null, episode: 42 },
     { series: 'Show 1', season: null, episode: 39 },
@@ -1109,7 +1111,26 @@ test('http: access tokens and the extension endpoint', async (t) => {
   assert.equal(res.body.pending, 1, 'season lookup has not run yet');
   await tracker.fillFranchises();
   res = await ext('POST', '/api/ext/watched', { items });
-  assert.deepEqual(res.body, { received: 4, matched: 2, added: 2, unmatched: [{ series: 'Unknown Thing', count: 2 }], pending: 0 });
+  assert.deepEqual(res.body, { received: 4, matched: 2, added: 2, unmatched: [{ series: 'Unknown Thing', count: 2 }], pending: 0, suggested: 1 });
+
+  // The untracked series becomes a Discover suggestion once looked up; a tracked one never does.
+  const user = Object.values(store.data.users)[0];
+  await tracker.resolveSeen(user, 10);
+  let disc = (await ann.req('GET', '/api/discover')).body;
+  assert.deepEqual(disc.seen.map((x) => [x.key, x.from, x.provider]), [['anilist:70', 'history', 'crunchyroll']]);
+
+  // Watchlist: tracked series are skipped, the rest are offered, and a title with no real match is dropped.
+  const seen = await ext('POST', '/api/ext/seen', { provider: 'crunchyroll', series: ['Show 1', 'Wishlisted', 'No Such Anime', 'Unknown Thing'] });
+  assert.deepEqual(seen.body, { received: 4, suggested: 2, alreadyTracked: 2 });
+  assert.equal((await ext('POST', '/api/ext/seen', { provider: 'nope', series: [] })).status, 400);
+  await tracker.resolveSeen(user, 10);
+  disc = (await ann.req('GET', '/api/discover')).body;
+  assert.deepEqual(disc.seen.map((x) => [x.key, x.from]), [['anilist:70', 'watchlist'], ['anilist:71', 'watchlist']], 'watchlist entries first; the history entry is upgraded');
+  assert.equal(disc.seenPending, 0);
+  // Tracking or dismissing a suggestion removes it.
+  await ann.req('POST', '/api/shows', { source: 'anilist', id: 70 });
+  await ann.req('POST', '/api/discover/dismiss', { key: 'anilist:71' });
+  assert.deepEqual((await ann.req('GET', '/api/discover')).body.seen, []);
   assert.deepEqual((await ann.req('GET', '/api/state')).body.watched.sort(), ['anilist:4:2', 'anilist:4:5']);
   assert.equal((await ext('POST', '/api/ext/watched', { items })).body.added, 0, 'sending the same history again changes nothing');
   assert.equal((await ext('POST', '/api/ext/watched', { items: [{ series: 'x', episode: 'nope' }] })).status, 400);
