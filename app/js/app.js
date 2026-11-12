@@ -1,58 +1,53 @@
-import {
-  DAY,
-  SERVICES,
-  DEFAULT_SERVICES,
-  nextEpisode,
-  episodesBetween,
-  collectAlerts,
-  myStreams,
-  dayKey,
-  monthGrid,
-  formatCountdown,
-} from './core.js';
-import { searchAnime, searchTv, fetchAnime, fetchTv } from './api.js';
-
-const STORE_KEY = 'show-tracker:v1';
-const REFRESH_EVERY = 30 * 60 * 1000;
-const MAX_ALERTS = 100;
+import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGrid, formatCountdown } from './core.js';
 
 // ---------------------------------------------------------------- state
 
-function loadState() {
-  const base = {
-    shows: {},
-    alerts: [],
-    alerted: [],
-    lastRefresh: 0,
-    settings: { services: [...DEFAULT_SERVICES], notify: true },
-  };
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
-    if (saved) return { ...base, ...saved, settings: { ...base.settings, ...saved.settings } };
-  } catch {
-    /* corrupt or unavailable storage: start fresh */
-  }
-  return base;
-}
-
-const state = loadState();
+// Everything lives on the server; this is the copy last fetched from it.
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '' };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   selectedDay: dayKey(Date.now()),
   refreshing: false,
   error: null,
+  session: null, // { setup, authed } once known
+  notice: null,
 };
 
-function save() {
+const shows = () => Object.values(state.shows);
+
+/** Call the server. On success with a state payload, adopt it. */
+async function call(method, path, body) {
+  let res;
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    res = await fetch(path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
   } catch {
-    ui.error = 'Could not save to browser storage — changes will be lost when this tab closes.';
+    throw new Error('Cannot reach the server.');
   }
+  const json = await res.json().catch(() => null);
+  if (res.status === 401 && ui.session?.authed) {
+    ui.session = { setup: true, authed: false };
+    render();
+  }
+  if (!res.ok) throw new Error(json?.error || `Request failed (${res.status})`);
+  if (json && json.shows) state = json;
+  return json;
 }
 
-const shows = () => Object.values(state.shows);
+/** Run a server action from a button/handler, surfacing failures in the banner. */
+async function act(method, path, body) {
+  try {
+    await call(method, path, body);
+    ui.error = null;
+  } catch (e) {
+    ui.error = e.message;
+  }
+  render();
+}
 
 // ---------------------------------------------------------------- dom helpers
 
@@ -296,9 +291,7 @@ function viewShows() {
               'aria-label': `Remove ${show.title}`,
               onclick: () => {
                 if (!confirm(`Stop tracking "${show.title}"?`)) return;
-                delete state.shows[show.key];
-                save();
-                render();
+                act('DELETE', `/api/shows?key=${encodeURIComponent(show.key)}`);
               },
             },
             'Remove',
@@ -312,8 +305,7 @@ function viewShows() {
 function viewAlerts() {
   const items = state.alerts;
   const out = [];
-  const perm = notifyPermission();
-  if (perm !== 'granted') {
+  if (!state.settings.ntfyUrl && !state.settings.discordWebhook) {
     out.push(
       h(
         'section',
@@ -321,8 +313,8 @@ function viewAlerts() {
         h(
           'div',
           { class: 'card' },
-          h('p', {}, perm === 'unsupported' ? 'This browser does not support desktop notifications. New episodes will still be listed here.' : perm === 'denied' ? 'Desktop notifications are blocked for this site. Allow them in your browser’s site settings to get a pop-up when an episode airs.' : 'Turn on desktop notifications to get a pop-up when a new episode airs.'),
-          perm === 'default' && h('button', { class: 'btn primary', type: 'button', onclick: enableNotifications }, 'Enable notifications'),
+          h('p', {}, 'No alert channel is set up yet, so new episodes are only listed here. Add an ntfy topic or a Discord webhook to get notified.'),
+          h('button', { class: 'btn primary', type: 'button', onclick: () => setTab('settings') }, 'Set up alerts'),
         ),
       ),
     );
@@ -335,24 +327,7 @@ function viewAlerts() {
     h(
       'section',
       {},
-      h(
-        'div',
-        { class: 'section-head' },
-        h('h2', {}, 'New episodes'),
-        h(
-          'button',
-          {
-            class: 'btn',
-            type: 'button',
-            onclick: () => {
-              state.alerts = [];
-              save();
-              render();
-            },
-          },
-          'Clear all',
-        ),
-      ),
+      h('div', { class: 'section-head' }, h('h2', {}, 'New episodes'), h('button', { class: 'btn', type: 'button', onclick: () => act('DELETE', '/api/alerts') }, 'Clear all')),
       h(
         'div',
         { class: 'list' },
@@ -365,7 +340,18 @@ function viewAlerts() {
 
 function viewSettings() {
   const s = state.settings;
-  const perm = notifyPermission();
+  const ntfy = h('input', { type: 'url', id: 'ntfy-url', value: s.ntfyUrl, placeholder: 'https://ntfy.sh/your-secret-topic-name', autocomplete: 'off' });
+  const discord = h('input', { type: 'url', id: 'discord-url', value: s.discordWebhook, placeholder: 'https://discord.com/api/webhooks/…', autocomplete: 'off' });
+  const notice = h('p', { class: 'muted small', role: 'status' }, ui.notice || '');
+  const say = (text) => {
+    ui.notice = text;
+    notice.textContent = text;
+  };
+  const saveChannels = async () => {
+    await call('PUT', '/api/settings', { ntfyUrl: ntfy.value, discordWebhook: discord.value });
+  };
+  const feedUrl = `${location.origin}/calendar.ics?token=${state.feedToken}`;
+
   return [
     h(
       'section',
@@ -385,11 +371,7 @@ function viewSettings() {
               h('input', {
                 type: 'checkbox',
                 checked: s.services.includes(id),
-                onchange: (e) => {
-                  s.services = e.target.checked ? [...s.services, id] : s.services.filter((x) => x !== id);
-                  save();
-                  render();
-                },
+                onchange: (e) => act('PUT', '/api/settings', { services: e.target.checked ? [...s.services, id] : s.services.filter((x) => x !== id) }),
               }),
               name,
             ),
@@ -400,50 +382,109 @@ function viewSettings() {
     h(
       'section',
       {},
-      h('h2', {}, 'Notifications'),
+      h('h2', {}, 'Alerts'),
       h(
         'div',
         { class: 'card' },
+        h('p', { class: 'muted' }, 'The server checks schedules around the clock and sends an alert when an episode airs — nothing needs to be open.'),
+        h('label', { class: 'field', for: 'ntfy-url' }, 'ntfy topic address', ntfy),
+        h('p', { class: 'muted small' }, 'Install the ntfy app, subscribe to a topic, and paste its address here. On ntfy.sh anyone who knows the topic name can read it, so pick a long random one.'),
+        h('label', { class: 'field', for: 'discord-url' }, 'Discord webhook URL', discord),
+        h('p', { class: 'muted small' }, 'In Discord: channel settings → Integrations → Webhooks → New Webhook → Copy Webhook URL.'),
         h(
           'div',
-          { class: 'checks' },
-          h(
-            'label',
-            {},
-            h('input', {
-              type: 'checkbox',
-              checked: s.notify,
-              onchange: (e) => {
-                s.notify = e.target.checked;
-                save();
-                if (s.notify && notifyPermission() === 'default') enableNotifications();
-                else render();
-              },
-            }),
-            'Show a desktop notification when a new episode airs',
-          ),
-        ),
-        h('p', { class: 'muted small' }, `Browser permission: ${perm}. Notifications only fire while this page is open (a pinned or background tab is fine); anything that aired while it was closed is listed under Alerts next time you open it.`),
-        perm === 'granted' &&
+          { class: 'actions' },
           h(
             'button',
-            { class: 'btn', type: 'button', onclick: () => new Notification('Show Tracker', { body: 'Notifications are working.' }) },
-            'Send a test notification',
+            {
+              class: 'btn primary',
+              type: 'button',
+              onclick: () => saveChannels().then(() => say('Saved.'), (e) => say(e.message)),
+            },
+            'Save',
           ),
+          h(
+            'button',
+            {
+              class: 'btn',
+              type: 'button',
+              onclick: () =>
+                saveChannels()
+                  .then(() => call('POST', '/api/test-alert'))
+                  .then(() => say('Test alert sent — check your phone / Discord.'), (e) => say(e.message)),
+            },
+            'Save and send a test alert',
+          ),
+        ),
+        notice,
       ),
     ),
     h(
       'section',
       {},
-      h('h2', {}, 'About the data'),
+      h('h2', {}, 'Calendar feed'),
+      h(
+        'div',
+        { class: 'card' },
+        h('p', { class: 'muted' }, 'Subscribe to this address from Google Calendar (“From URL”), Outlook or Apple Calendar to see releases alongside everything else. Treat it like a password: anyone with the link can see your list.'),
+        h('label', { class: 'field', for: 'feed-url' }, 'Feed address', h('input', { type: 'text', id: 'feed-url', readonly: true, value: feedUrl, onfocus: (e) => e.target.select() })),
+      ),
+    ),
+    h(
+      'section',
+      {},
+      h('h2', {}, 'About'),
       h(
         'div',
         { class: 'card' },
         h('p', { class: 'muted' }, 'Anime schedules come from AniList and TV schedules from TVmaze. Anime times are the Japanese broadcast time; the episode usually reaches Crunchyroll or HIDIVE within an hour or so, but some simulcasts are delayed. Streaming-site tags are not region-specific, so double-check availability in your country.'),
-        h('p', { class: 'muted' }, 'Your list is stored in this browser only.'),
+        h(
+          'button',
+          {
+            class: 'btn',
+            type: 'button',
+            onclick: async () => {
+              await call('POST', '/api/logout').catch(() => {});
+              ui.session = { setup: true, authed: false };
+              render();
+            },
+          },
+          'Sign out',
+        ),
       ),
     ),
   ];
+}
+
+function viewAuth() {
+  const first = !ui.session.setup;
+  const pw = h('input', { type: 'password', id: 'password', autocomplete: first ? 'new-password' : 'current-password', required: true, minlength: first ? 8 : null });
+  const msg = h('p', { class: 'error small', role: 'alert' });
+  const form = h(
+    'form',
+    {
+      class: 'card auth',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        msg.textContent = '';
+        try {
+          await call('POST', first ? '/api/setup' : '/api/login', { password: pw.value });
+          ui.session = { setup: true, authed: true };
+          await call('GET', '/api/state');
+          render();
+        } catch (err) {
+          msg.textContent = err.message;
+        }
+      },
+    },
+    h('h3', {}, first ? 'Create a password' : 'Sign in'),
+    first && h('p', { class: 'muted' }, 'This is the first visit. Choose the password that will protect your list (at least 8 characters).'),
+    h('label', { class: 'field', for: 'password' }, 'Password', pw),
+    h('button', { class: 'btn primary', type: 'submit' }, first ? 'Create password' : 'Sign in'),
+    msg,
+  );
+  setTimeout(() => pw.focus());
+  return form;
 }
 
 const TABS = [
@@ -459,6 +500,13 @@ const TABS = [
 const $ = (id) => document.getElementById(id);
 
 function render() {
+  const authed = Boolean(ui.session?.authed);
+  document.body.classList.toggle('signed-out', !authed);
+  if (!authed) {
+    $('banner').hidden = true;
+    $('view').replaceChildren(...(ui.session ? [viewAuth()] : [empty('Loading…', '')]));
+    return;
+  }
   const unread = state.alerts.filter((a) => !a.read).length;
   $('tabs').replaceChildren(
     ...TABS.map(([id, label]) =>
@@ -477,8 +525,9 @@ function render() {
     ),
   );
 
-  $('banner').hidden = !ui.error;
-  $('banner').textContent = ui.error || '';
+  const problem = ui.error || state.lastError;
+  $('banner').hidden = !problem;
+  $('banner').textContent = problem || '';
 
   $('refresh-btn').disabled = ui.refreshing || !shows().length;
   $('refresh-btn').textContent = ui.refreshing ? 'Refreshing…' : 'Refresh';
@@ -492,111 +541,29 @@ function render() {
 
 function setTab(id) {
   // Leaving the alerts tab marks what you saw there as read.
-  if (ui.tab === 'alerts' && id !== 'alerts') {
+  if (ui.tab === 'alerts' && id !== 'alerts' && state.alerts.some((a) => !a.read)) {
     for (const a of state.alerts) a.read = true;
-    save();
+    call('POST', '/api/alerts/read').catch(() => {});
   }
   ui.tab = id;
+  ui.notice = null;
   render();
-}
-
-// ---------------------------------------------------------------- alerts
-
-function notifyPermission() {
-  return 'Notification' in window ? Notification.permission : 'unsupported';
-}
-
-async function enableNotifications() {
-  try {
-    await Notification.requestPermission();
-  } catch {
-    /* ignore */
-  }
-  render();
-}
-
-function notify(title, body, icon, tag) {
-  if (!state.settings.notify || notifyPermission() !== 'granted') return;
-  try {
-    const n = new Notification(title, { body, icon: safeUrl(icon) || undefined, tag });
-    n.onclick = () => {
-      window.focus();
-      setTab('alerts');
-    };
-  } catch {
-    /* some browsers only allow notifications from a service worker */
-  }
-}
-
-function checkAlerts() {
-  const fresh = collectAlerts(shows(), new Set(state.alerted));
-  if (!fresh.length) return false;
-  for (const { show, ep } of fresh) {
-    state.alerted.push(ep.id);
-    state.alerts.unshift({
-      showKey: show.key,
-      // Snapshot so the alert still renders if the show is removed later.
-      show: { key: show.key, title: show.title, image: show.image, url: show.url, streams: show.streams, kind: show.kind },
-      ep,
-      read: false,
-    });
-  }
-  state.alerts.length = Math.min(state.alerts.length, MAX_ALERTS);
-  state.alerted = state.alerted.slice(-2000);
-  save();
-
-  if (fresh.length <= 3) {
-    for (const { show, ep } of fresh) {
-      const where = myStreams(show, state.settings.services).map((s) => s.name).join(', ');
-      notify(show.title, `${ep.label} is out${where ? ` on ${where}` : ''}`, show.image, ep.id);
-    }
-  } else {
-    const names = [...new Set(fresh.map((f) => f.show.title))];
-    notify(`${fresh.length} new episodes`, names.slice(0, 4).join(', ') + (names.length > 4 ? '…' : ''), null, 'batch');
-  }
-  return true;
 }
 
 // ---------------------------------------------------------------- data refresh
 
-function storeShow(fresh, addedAt) {
-  state.shows[fresh.key] = { ...fresh, addedAt };
-}
-
 async function refreshAll() {
-  if (ui.refreshing || !shows().length) return;
+  if (ui.refreshing) return;
   ui.refreshing = true;
-  ui.error = null;
   render();
-  const failures = [];
   try {
-    const current = shows();
-    const animeIds = current.filter((s) => s.source === 'anilist').map((s) => s.id);
-    if (animeIds.length) {
-      try {
-        for (const fresh of await fetchAnime(animeIds)) {
-          if (state.shows[fresh.key]) storeShow(fresh, state.shows[fresh.key].addedAt);
-        }
-      } catch (e) {
-        failures.push(e.message);
-      }
-    }
-    for (const s of current.filter((x) => x.source === 'tvmaze')) {
-      try {
-        const fresh = await fetchTv(s.id);
-        if (state.shows[fresh.key]) storeShow(fresh, state.shows[fresh.key].addedAt);
-      } catch (e) {
-        failures.push(e.message);
-      }
-    }
-    if (failures.length) ui.error = `Could not update everything: ${[...new Set(failures)].join(' ')}`;
-    else state.lastRefresh = Date.now();
-  } finally {
-    ui.refreshing = false;
-    save();
-    checkAlerts();
-    render();
+    await call('POST', '/api/refresh');
+    ui.error = null;
+  } catch (e) {
+    ui.error = e.message;
   }
+  ui.refreshing = false;
+  render();
 }
 
 // ---------------------------------------------------------------- search / add
@@ -619,10 +586,7 @@ function resultRow(show) {
     btn.disabled = true;
     btn.textContent = 'Adding…';
     try {
-      const full = show.source === 'anilist' ? (await fetchAnime([show.id]))[0] : await fetchTv(show.id);
-      if (!full) throw new Error('Show not found.');
-      storeShow(full, Date.now());
-      save();
+      await call('POST', '/api/shows', { source: show.source, id: show.id });
       btn.textContent = 'Added';
       btn.classList.remove('primary');
       ui.error = null;
@@ -644,7 +608,7 @@ async function runSearch() {
   resultsEl.hidden = false;
   resultsEl.replaceChildren(h('div', { class: 'empty' }, 'Searching…'));
   try {
-    const found = await (searchSource.value === 'anime' ? searchAnime(q) : searchTv(q));
+    const found = await call('GET', `/api/search?source=${searchSource.value}&q=${encodeURIComponent(q)}`);
     if (seq !== searchSeq) return;
     resultsEl.replaceChildren(...(found.length ? found.map(resultRow) : [h('div', { class: 'empty' }, `No ${searchSource.value === 'anime' ? 'anime' : 'TV shows'} found for “${q}”.`)]));
   } catch (e) {
@@ -678,14 +642,23 @@ document.addEventListener('pointerdown', (e) => {
 
 $('refresh-btn').addEventListener('click', refreshAll);
 
-checkAlerts();
-render();
-if (Date.now() - state.lastRefresh > REFRESH_EVERY) refreshAll();
+async function boot() {
+  render();
+  try {
+    ui.session = await call('GET', '/api/session');
+    if (ui.session.authed) await call('GET', '/api/state');
+  } catch (e) {
+    ui.session = { setup: true, authed: false };
+    ui.error = e.message;
+  }
+  render();
+}
+boot();
 
-// Every minute: fire alerts for anything that just aired, keep countdowns fresh,
-// and re-pull schedules once they are stale.
-setInterval(() => {
-  checkAlerts();
-  if (Date.now() - state.lastRefresh > REFRESH_EVERY) refreshAll();
-  else if (ui.tab !== 'settings') render();
+// Every minute: pick up new alerts and schedule changes from the server and keep
+// countdowns fresh. Skipped on Settings so typing is never interrupted.
+setInterval(async () => {
+  if (!ui.session?.authed || ui.tab === 'settings') return;
+  await call('GET', '/api/state').catch(() => {});
+  render();
 }, 60 * 1000);

@@ -1,17 +1,11 @@
 # Show Tracker
 
 Track upcoming episode releases for anime and TV shows: add titles, see what is
-coming up, browse a calendar, and get a desktop notification when a new episode airs.
+coming up, browse a calendar, and get an alert on your phone or in Discord when a
+new episode airs.
 
-## Run it
-
-Requires [Node.js](https://nodejs.org) 18 or newer. There is nothing to install.
-
-```
-npm start
-```
-
-Then open <http://localhost:4173>. (Set `PORT` to use a different port.)
+It is a small self-hosted web app. The server keeps your list, checks schedules
+around the clock, and sends the alerts, so nothing has to be open on your PC.
 
 ## What it does
 
@@ -20,24 +14,54 @@ Then open <http://localhost:4173>. (Set `PORT` to use a different port.)
 - **Upcoming** – every scheduled episode for the next 60 days, grouped by day, in
   your local time, plus what aired in the last week.
 - **Calendar** – a month view; click a day to see its episodes.
-- **Alerts** – when an episode of a tracked show airs you get a desktop notification
-  (once you allow them) and an entry in the Alerts tab. Episodes that aired while
-  the app was closed are picked up the next time you open it.
+- **Alerts** – when an episode of a tracked show airs, the server sends a push
+  through [ntfy](https://ntfy.sh) and/or a Discord webhook, and lists it in the
+  Alerts tab. Set the channels up under *Settings*.
+- **Calendar feed** – a private `.ics` address (under *Settings*) you can subscribe
+  to from Google Calendar, Outlook or Apple Calendar.
 - **Streaming services** – each show is tagged with where it streams. Your services
-  (Crunchyroll, HIDIVE and Prime Video by default; change them under *Settings*) are
-  highlighted, and shows that are on none of them are flagged.
+  (Crunchyroll, HIDIVE and Prime Video by default) are highlighted, and shows that
+  are on none of them are flagged.
+- **One password** – the first visit asks you to create it; after that the list is
+  only reachable when signed in.
 
-Schedules refresh automatically every 30 minutes while the page is open.
+## Run it
+
+### Docker (Coolify, or any Docker host)
+
+The repo has a `Dockerfile`. The container listens on port **3000** and stores
+everything in **`/data`** – mount a persistent volume there or the list is lost on
+every redeploy. There are no required environment variables.
+
+```
+docker build -t show-tracker .
+docker run -d -p 3000:3000 -v show-tracker-data:/data show-tracker
+```
+
+Put it behind HTTPS (Coolify's proxy does this) and open it straight away to set
+the password – until one is set, whoever visits first gets to choose it.
+
+### Locally
+
+Requires [Node.js](https://nodejs.org) 22 or newer. There is nothing to install.
+
+```
+npm start
+```
+
+Then open <http://localhost:3000>. `PORT` and `DATA_DIR` (default `./data`) can be
+set as environment variables.
 
 ## Good to know
 
-- Your list lives in the browser's local storage – it is per browser, and clearing
-  site data clears it.
-- Notifications only fire while the page is open (a background or pinned tab is fine).
 - Anime air times are the Japanese broadcast time. Simulcasts usually appear on
   Crunchyroll / HIDIVE shortly after, but some are delayed.
 - Streaming tags are not region-specific.
 - Movies outside of anime are not covered (TVmaze only lists series).
+- On the public ntfy.sh server, anyone who knows a topic name can read it – use a
+  long random topic.
+- Forgot the password? Stop the app, remove the `"auth"` entry from
+  `/data/state.json`, start it again and create a new one. Your list is kept.
 
 ## Development
 
@@ -45,10 +69,8 @@ Schedules refresh automatically every 30 minutes while the page is open.
 npm test
 ```
 
-- `app/js/core.js` – pure logic (normalising API data, alert detection, calendar grid); unit-tested in `tests/`.
-- `app/js/api.js` – AniList and TVmaze requests.
-- `app/js/app.js` – UI and state.
-- `server.js` – zero-dependency static server for `app/`.
-
-The app is plain static files with no build step, so it can later be wrapped in a
-desktop shell (tray icon, start with Windows) without changes to the core.
+- `app/` – the browser app (plain static files, no build step).
+  `app/js/core.js` holds the pure logic shared with the server.
+- `server.js` – HTTP server, login and API routes.
+- `server/` – storage, schedule sources, background tracker, alert delivery and the
+  calendar feed.

@@ -206,3 +206,19 @@ h2 .today { color: var(--accent); }
   .cell .chip { font-size: 0; height: 5px; padding: 0; border-radius: 3px; border-left-width: 14px; }
   .cell .more { display: none; }
 }
+
+/* ---------- forms / sign-in ---------- */
+.field { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-weight: 600; font-size: 13px; }
+.field input {
+  font: inherit; font-weight: 400; color: var(--text); width: 100%;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px;
+}
+.field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.card .field + p { margin-top: 4px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.card .actions + p { margin-top: 8px; min-height: 1.4em; }
+.error { color: var(--danger); min-height: 1.4em; }
+.auth { max-width: 380px; margin: 8vh auto 0; display: flex; flex-direction: column; gap: 12px; }
+.auth h3 { font-size: 18px; }
+.auth .field { margin-top: 0; }
+.signed-out .search, .signed-out .top-actions, .signed-out .tabs { display: none; }
