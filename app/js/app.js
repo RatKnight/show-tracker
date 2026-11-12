@@ -2136,6 +2136,7 @@ function render() {
           class: 'tab',
           type: 'button',
           'aria-current': ui.tab === id ? 'page' : null,
+          'data-tab': id,
           onclick: () => setTab(id),
         },
         label,
@@ -2167,7 +2168,114 @@ function render() {
   // An admin page left open by someone who is no longer an admin falls back to the start.
   const build = PAGES[ui.tab] || visibleTabs().find(([id]) => id === ui.tab)?.[2] || viewUpcoming;
   $('view').replaceChildren(...[build()].flat());
+
+  // New here: walk through the app once. Re-rendering replaces the tab buttons, so
+  // a tour that is already running finds its target again.
+  if (tour.at >= 0) placeTour();
+  else if (!state.settings.tourDone && !tour.offered) startTour();
 }
+
+// ---------------------------------------------------------------- guided tour
+
+/** Each step: what to point at (a tab id, or an element id), and what to say about it. */
+const TOUR = [
+  { title: 'Welcome to Show Tracker', text: 'It watches the shows you follow and tells you when new episodes, seasons and films come out. This tour takes about a minute.' },
+  { el: 'search-form', title: 'Add a show', text: 'Start here. Pick Anime, TV or Movies, type a title and choose it from the results. Everything else in the app is built from the shows you add.' },
+  { tab: 'upcoming', title: 'Upcoming', text: 'Your home page: the next episodes of your shows in date order, with a countdown and where to watch them. Episodes that aired recently and are waiting for you sit at the top.' },
+  { tab: 'next', title: 'Watch next', text: 'Where you are in each show. Tick off episodes as you watch them, or mark a whole show as caught up.' },
+  { tab: 'calendar', title: 'Calendar', text: 'The same releases as a month view. Pick a day to see what airs on it.' },
+  { tab: 'discover', title: 'Discover', text: 'Things to add: new seasons of shows you follow, suggestions based on your list, what is airing this season and next, new arrivals on streaming, and films coming to cinemas.' },
+  { tab: 'shows', title: 'My shows', text: 'Everything you follow, with seasons of one series kept together. Mute a show to keep it listed without notifications, or remove it.' },
+  { tab: 'alerts', title: 'Alerts', text: 'A note appears here whenever a new episode airs or a new season is announced. The number on the tab counts the ones you have not read.' },
+  { tab: 'settings', title: 'Settings', text: 'Tell the app which streaming services you have and which country you are in, choose subtitled or dubbed releases, and send alerts to your phone or Discord. Changes save by themselves.' },
+  { tab: 'admin', title: 'Admin', text: 'Only admins see this tab. Invite people, manage their accounts and check the site’s health. It asks you to confirm it is you once each time you sign in.' },
+  { el: 'refresh-btn', title: 'Refresh', text: 'Schedules are checked for you around the clock. Use this when you want the latest right now.' },
+  { el: 'profile-btn', title: 'Your account', text: 'Your profile has your password, passkeys, e-mail address and the browser extension. Your list is private: nobody else can see it unless you create a share link there. This tour can be replayed from this menu.' },
+  { title: 'You are set', text: 'Add your first show with the search box at the top, and the rest fills in by itself.' },
+];
+const tour = { at: -1, steps: [], offered: false, returnTab: null, focusBack: null };
+
+const tourTarget = (step) => (step.tab ? document.querySelector(`#tabs [data-tab="${step.tab}"]`) : step.el ? $(step.el) : null);
+
+function startTour() {
+  tour.offered = true;
+  // Steps for things this person cannot see (the Admin tab) are left out.
+  tour.steps = TOUR.filter((s) => !s.tab || visibleTabs().some(([id]) => id === s.tab));
+  tour.returnTab = ui.tab;
+  tour.focusBack = document.activeElement;
+  $('tour').hidden = false;
+  showTourStep(0);
+}
+
+function showTourStep(i) {
+  tour.at = i;
+  const step = tour.steps[i];
+  $('tour-count').textContent = `Step ${i + 1} of ${tour.steps.length}`;
+  $('tour-title').textContent = step.title;
+  $('tour-text').textContent = step.text;
+  $('tour-back').hidden = i === 0;
+  $('tour-skip').hidden = i === tour.steps.length - 1;
+  $('tour-next').textContent = i === tour.steps.length - 1 ? 'Done' : i === 0 ? 'Start' : 'Next';
+  // Show the page being described behind the note. setTab renders, which places the tour.
+  // Steps about the header show the home page behind them.
+  const page = step.tab || 'upcoming';
+  if (ui.tab !== page) setTab(page);
+  else placeTour();
+  $('tour-next').focus();
+}
+
+/** Put the highlight on the current step's target and the note next to it. */
+function placeTour() {
+  if (tour.at < 0) return;
+  const target = tourTarget(tour.steps[tour.at]);
+  const spot = $('tour-spot');
+  const card = $('tour-card');
+  const vw = document.documentElement.clientWidth;
+  const vh = window.innerHeight;
+  const left = (x) => `${Math.max(12, Math.min(x, vw - card.offsetWidth - 12))}px`;
+  if (!target) {
+    // No target: dim everything and centre the note.
+    Object.assign(spot.style, { top: `${vh / 2}px`, left: `${vw / 2}px`, width: '0px', height: '0px' });
+    Object.assign(card.style, { top: `${Math.max(12, (vh - card.offsetHeight) / 2)}px`, left: left((vw - card.offsetWidth) / 2) });
+    return;
+  }
+  target.scrollIntoView({ block: 'nearest', inline: 'center' });
+  const r = target.getBoundingClientRect();
+  const pad = 5;
+  Object.assign(spot.style, { top: `${r.top - pad}px`, left: `${r.left - pad}px`, width: `${r.width + pad * 2}px`, height: `${r.height + pad * 2}px` });
+  const below = r.bottom + pad + 12;
+  const top = below + card.offsetHeight <= vh - 12 ? below : Math.max(12, r.top - pad - 12 - card.offsetHeight);
+  Object.assign(card.style, { top: `${top}px`, left: left(r.left + r.width / 2 - card.offsetWidth / 2) });
+}
+
+function endTour() {
+  if (tour.at < 0) return;
+  tour.at = -1;
+  $('tour').hidden = true;
+  if (!state.settings.tourDone) call('PUT', '/api/settings', { tourDone: true }).catch(() => {});
+  setTab(tour.returnTab === 'admin' ? 'upcoming' : tour.returnTab || 'upcoming');
+  window.scrollTo(0, 0);
+  tour.focusBack?.focus?.();
+}
+
+$('tour-next').addEventListener('click', () => (tour.at >= tour.steps.length - 1 ? endTour() : showTourStep(tour.at + 1)));
+$('tour-back').addEventListener('click', () => tour.at > 0 && showTourStep(tour.at - 1));
+$('tour-skip').addEventListener('click', endTour);
+window.addEventListener('resize', placeTour);
+window.addEventListener('scroll', placeTour, { passive: true });
+document.addEventListener('keydown', (e) => {
+  if (tour.at < 0) return;
+  if (e.key === 'Escape') endTour();
+  else if (e.key === 'ArrowRight' && tour.at < tour.steps.length - 1) showTourStep(tour.at + 1);
+  else if (e.key === 'ArrowLeft' && tour.at > 0) showTourStep(tour.at - 1);
+  else if (e.key === 'Tab') {
+    // Keep the keyboard inside the note while it is open.
+    const buttons = [...$('tour-card').querySelectorAll('button:not([hidden])')];
+    const at = buttons.indexOf(document.activeElement);
+    e.preventDefault();
+    buttons[(at + (e.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus();
+  }
+});
 
 function setTab(id) {
   // Leaving the alerts tab marks what you saw there as read.
@@ -2322,6 +2430,7 @@ profileMenu.addEventListener('click', async (e) => {
     location.reload();
     return;
   }
+  if (go === 'tour') return startTour();
   setTab(go);
   window.scrollTo(0, 0);
 });
@@ -2386,7 +2495,7 @@ window.addEventListener('hashchange', () => {
 // Every minute: pick up new alerts and schedule changes from the server and keep
 // countdowns fresh. Skipped on Settings so typing is never interrupted.
 setInterval(async () => {
-  if (!ui.session?.authed || ['settings', 'discover', 'profile', 'admin'].includes(ui.tab)) return;
+  if (!ui.session?.authed || tour.at >= 0 || ['settings', 'discover', 'profile', 'admin'].includes(ui.tab)) return;
   await call('GET', '/api/state').catch(() => {});
   render();
 }, 60 * 1000);

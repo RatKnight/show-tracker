@@ -287,7 +287,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     };
     const route = `${req.method} ${url.pathname}`;
     const secure = req.viaHttps;
-    const u = sessionUser(req.headers.cookie, data, now());
+    const u = sessionUser(req.headers.cookie, data, now(), secure);
     const signIn = (user) => ({ 'Set-Cookie': sessionCookie(data.secret, user, secure, now()) });
 
     // ---------------------------------------------------------- browser extension
@@ -382,12 +382,12 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
     if (route === 'POST /api/login/passkey' || route === 'POST /api/login/recovery') {
       guardAttempts(req);
-      const user = pendingUser(req.headers.cookie, data, now());
+      const user = pendingUser(req.headers.cookie, data, now(), secure);
       if (!user) throw new HttpError(401, 'Sign in with your password first.');
       const body = await readJson(req);
       const done = () => {
         store.save();
-        res.setHeader('Set-Cookie', [sessionCookie(data.secret, user, secure, now()), clearPendingCookie()]);
+        res.setHeader('Set-Cookie', [sessionCookie(data.secret, user, secure, now()), ...clearPendingCookie(secure)]);
         return reply(200, { ok: true, recoveryCodesLeft: user.recoveryCodes.length });
       };
       if (route.endsWith('/recovery')) {
@@ -415,7 +415,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     }
 
     if (route === 'POST /api/logout') {
-      res.setHeader('Set-Cookie', [clearCookie(), clearPendingCookie(), clearAdminCookie()]);
+      res.setHeader('Set-Cookie', [...clearCookie(secure), ...clearPendingCookie(secure), ...clearAdminCookie(secure)]);
       return reply(200, { ok: true });
     }
 
@@ -531,7 +531,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       // per browser session: with a passkey (or a recovery code) when they have
       // one, otherwise with their password.
       if (route === 'GET /api/admin/unlock') {
-        if (adminUnlocked(req.headers.cookie, data.secret, u, now())) return reply(200, { unlocked: true });
+        if (adminUnlocked(req.headers.cookie, data.secret, u, now(), secure)) return reply(200, { unlocked: true });
         return reply(200, hasMfa(u) ? { unlocked: false, method: 'passkey', options: requestOptions({ rpId: siteOf(req).rpId, challenge: setChallenge(`admin:${u.id}`), allow: u.passkeys }) } : { unlocked: false, method: 'password' });
       }
       if (route === 'POST /api/admin/unlock') {
@@ -562,7 +562,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         }
         return reply(200, { unlocked: true }, { 'Set-Cookie': adminCookie(data.secret, u, req.headers.cookie, secure, now()) });
       }
-      if (!adminUnlocked(req.headers.cookie, data.secret, u, now())) {
+      if (!adminUnlocked(req.headers.cookie, data.secret, u, now(), secure)) {
         res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...securityHeaders(req) });
         return res.end(JSON.stringify({ error: 'Confirm it is you to open the admin pages.', locked: true }));
       }
@@ -684,6 +684,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           backupToDiscord: typeof body.backupToDiscord === 'boolean' ? body.backupToDiscord : cur.backupToDiscord,
           autoTrackSeasons: typeof body.autoTrackSeasons === 'boolean' ? body.autoTrackSeasons : cur.autoTrackSeasons,
           cinemaAlerts: typeof body.cinemaAlerts === 'boolean' ? body.cinemaAlerts : cur.cinemaAlerts,
+          tourDone: typeof body.tourDone === 'boolean' ? body.tourDone : Boolean(cur.tourDone),
         };
         const problem = validateChannels(next);
         if (problem) throw new HttpError(400, problem);

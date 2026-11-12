@@ -22,6 +22,7 @@ const settingsDefaults = () => ({
   backupToDiscord: false,
   autoTrackSeasons: true, // new seasons of tracked anime join the list by themselves
   cinemaAlerts: true, // tell me when an anime film gets a US cinema date
+  tourDone: false, // the guided tour has been finished or skipped
 });
 
 /** A complete user record: defaults, overlaid with whatever is given. */
