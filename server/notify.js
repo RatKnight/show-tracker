@@ -61,6 +61,8 @@ async function post(url, body, what) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15000),
+    // Never follow a redirect to some other host with the alert contents.
+    redirect: 'error',
   });
   if (!res.ok) throw new Error(`${what} replied ${res.status}`);
 }

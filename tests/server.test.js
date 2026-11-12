@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server.js';
@@ -116,6 +116,7 @@ test('store persists to disk and refuses a corrupt file', () => {
   assert.deepEqual(b.data.shows, { x: { key: 'x' } });
   assert.equal(b.data.secret, a.data.secret);
   assert.throws(() => openStore(join(dir, 'state.json')), /Cannot read|ENOTDIR|EEXIST/);
+  assert.equal(statSync(join(dir, 'state.json')).mode & 0o777, 0o600, 'state file is owner-only');
 });
 
 test('auth helpers', () => {
@@ -162,7 +163,7 @@ test('http api: setup, login, add, settings, feed', async (t) => {
   const clock = { t: Date.now() };
   const dir = tmp();
   const sent = [];
-  const { server } = createApp({ dataDir: dir, sources: fakeSources(clock), send: async (_s, m) => (sent.push(...m), []) });
+  const { server, setupCode } = createApp({ dataDir: dir, sources: fakeSources(clock), send: async (_s, m) => (sent.push(...m), []) });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -187,9 +188,12 @@ test('http api: setup, login, add, settings, feed', async (t) => {
   assert.equal((await req('GET', '/api/state')).status, 401);
   assert.equal((await req('POST', '/api/shows', { source: 'anilist', id: 5 })).status, 401);
 
-  assert.equal((await req('POST', '/api/setup', { password: 'short' })).status, 400);
-  assert.equal((await req('POST', '/api/setup', { password: 'long enough pw' })).status, 200);
-  assert.equal((await req('POST', '/api/setup', { password: 'another password' })).status, 409);
+  assert.match(setupCode, /^\d{6}$/);
+  assert.equal((await req('POST', '/api/setup', { password: 'long enough pw' })).status, 403, 'no setup code');
+  assert.equal((await req('POST', '/api/setup', { password: 'long enough pw', code: '' })).status, 403);
+  assert.equal((await req('POST', '/api/setup', { password: 'short', code: setupCode })).status, 400);
+  assert.equal((await req('POST', '/api/setup', { password: 'long enough pw', code: setupCode })).status, 200);
+  assert.equal((await req('POST', '/api/setup', { password: 'another password', code: setupCode })).status, 409);
   assert.deepEqual((await req('GET', '/api/session')).body, { setup: true, authed: true });
 
   cookie = '';
@@ -223,6 +227,65 @@ test('http api: setup, login, add, settings, feed', async (t) => {
   assert.deepEqual((await req('DELETE', '/api/shows?key=anilist:5')).body.shows, {});
   assert.ok(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')).auth.hash, 'state persisted');
 
+  // Rotating the feed address kills the old one.
+  const rotated = await req('POST', '/api/feed/rotate');
+  assert.notEqual(rotated.body.feedToken, saved.body.feedToken);
+  assert.equal((await req('GET', `/calendar.ics?token=${saved.body.feedToken}`)).status, 404);
+
+  // Changing the password signs other sessions out and the old password stops working.
+  const oldCookie = cookie;
+  assert.equal((await req('POST', '/api/password', { current: 'nope', next: 'brand new password' })).status, 403);
+  assert.equal((await req('POST', '/api/password', { current: 'long enough pw', next: 'short' })).status, 400);
+  assert.equal((await req('POST', '/api/password', { current: 'long enough pw', next: 'brand new password' })).status, 200);
+  assert.equal((await req('GET', '/api/state')).status, 200, 'this session continues');
+  const kept = cookie;
+  cookie = oldCookie;
+  assert.equal((await req('GET', '/api/state')).status, 401, 'old session is revoked');
+  cookie = '';
+  assert.equal((await req('POST', '/api/login', { password: 'long enough pw' })).status, 401);
+  cookie = kept;
+
   await req('POST', '/api/logout');
   assert.equal((await req('GET', '/api/state')).status, 401);
+});
+
+test('http hardening: malformed requests do not crash, guesses are limited', async (t) => {
+  const dir = tmp();
+  const { server, setupCode } = createApp({ dataDir: dir, sources: fakeSources({ t: Date.now() }), send: async () => [] });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
+
+  // A raw request target that the URL parser rejects used to kill the process.
+  const { connect } = await import('node:net');
+  const raw = (line) =>
+    new Promise((resolve) => {
+      const sock = connect(port, '127.0.0.1', () => sock.write(`${line}\r\nHost: x\r\nConnection: close\r\n\r\n`));
+      let out = '';
+      sock.on('data', (d) => (out += d));
+      sock.on('close', () => resolve(out));
+      sock.on('error', () => resolve(out));
+    });
+  assert.match(await raw('GET // HTTP/1.1'), /^HTTP\/1\.1 400/);
+  assert.match(await raw('GET /%E0%A4%A HTTP/1.1'), /^HTTP\/1\.1 400/);
+  assert.equal((await fetch(`${base}/healthz`)).status, 200, 'still alive');
+
+  const page = await fetch(base + '/', { headers: { 'X-Forwarded-Proto': 'https' } });
+  assert.match(page.headers.get('content-security-policy'), /script-src 'self'/);
+  assert.equal(page.headers.get('strict-transport-security'), 'max-age=31536000');
+  assert.equal(page.headers.get('x-frame-options'), 'DENY');
+
+  const post = (path, body, ip) =>
+    fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip }, body: JSON.stringify(body) });
+
+  // Setup-code guessing is limited per client address.
+  for (let i = 0; i < 8; i++) assert.equal((await post('/api/setup', { password: 'long enough pw', code: 'x' }, '203.0.113.1')).status, 403);
+  assert.equal((await post('/api/setup', { password: 'long enough pw', code: setupCode }, '203.0.113.1')).status, 429);
+  assert.equal((await post('/api/setup', { password: 'long enough pw', code: setupCode }, '203.0.113.2')).status, 200);
+
+  // So is password guessing, without locking out other addresses.
+  for (let i = 0; i < 8; i++) assert.equal((await post('/api/login', { password: 'wrong' }, '203.0.113.3')).status, 401);
+  assert.equal((await post('/api/login', { password: 'long enough pw' }, '203.0.113.3')).status, 429);
+  assert.equal((await post('/api/login', { password: 'long enough pw' }, '203.0.113.4')).status, 200);
 });

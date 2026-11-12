@@ -31,7 +31,8 @@ export function openStore(dir) {
     data,
     save() {
       const tmp = file + '.tmp';
-      writeFileSync(tmp, JSON.stringify(data));
+      // Holds the password hash, signing secret and webhook URLs: owner-only.
+      writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
       renameSync(tmp, file);
     },
   };

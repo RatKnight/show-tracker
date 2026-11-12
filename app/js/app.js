@@ -428,7 +428,65 @@ function viewSettings() {
         { class: 'card' },
         h('p', { class: 'muted' }, 'Subscribe to this address from Google Calendar (“From URL”), Outlook or Apple Calendar to see releases alongside everything else. Treat it like a password: anyone with the link can see your list.'),
         h('label', { class: 'field', for: 'feed-url' }, 'Feed address', h('input', { type: 'text', id: 'feed-url', readonly: true, value: feedUrl, onfocus: (e) => e.target.select() })),
+        h(
+          'div',
+          { class: 'actions' },
+          h(
+            'button',
+            {
+              class: 'btn',
+              type: 'button',
+              onclick: () => {
+                if (confirm('Create a new feed address? The old one stops working, so calendars subscribed to it must be re-added.')) act('POST', '/api/feed/rotate');
+              },
+            },
+            'Replace with a new address',
+          ),
+        ),
       ),
+    ),
+    h(
+      'section',
+      {},
+      h('h2', {}, 'Security'),
+      (() => {
+        const cur = h('input', { type: 'password', id: 'pw-current', autocomplete: 'current-password', required: true });
+        const next = h('input', { type: 'password', id: 'pw-next', autocomplete: 'new-password', required: true, minlength: 8 });
+        const out = h('p', { class: 'muted small', role: 'status' });
+        return h(
+          'form',
+          {
+            class: 'card',
+            onsubmit: async (e) => {
+              e.preventDefault();
+              try {
+                await call('POST', '/api/password', { current: cur.value, next: next.value });
+                cur.value = next.value = '';
+                out.textContent = 'Password changed. Other devices have been signed out.';
+              } catch (err) {
+                out.textContent = err.message;
+              }
+            },
+          },
+          h('label', { class: 'field', for: 'pw-current' }, 'Current password', cur),
+          h('label', { class: 'field', for: 'pw-next' }, 'New password', next),
+          h(
+            'div',
+            { class: 'actions' },
+            h('button', { class: 'btn primary', type: 'submit' }, 'Change password'),
+            h(
+              'button',
+              {
+                class: 'btn',
+                type: 'button',
+                onclick: () => call('POST', '/api/sessions/revoke').then(() => (out.textContent = 'Every other device has been signed out.'), (err) => (out.textContent = err.message)),
+              },
+              'Sign out other devices',
+            ),
+          ),
+          out,
+        );
+      })(),
     ),
     h(
       'section',
@@ -459,6 +517,7 @@ function viewSettings() {
 function viewAuth() {
   const first = !ui.session.setup;
   const pw = h('input', { type: 'password', id: 'password', autocomplete: first ? 'new-password' : 'current-password', required: true, minlength: first ? 8 : null });
+  const code = h('input', { type: 'text', id: 'setup-code', inputmode: 'numeric', autocomplete: 'off', required: true });
   const msg = h('p', { class: 'error small', role: 'alert' });
   const form = h(
     'form',
@@ -468,7 +527,7 @@ function viewAuth() {
         e.preventDefault();
         msg.textContent = '';
         try {
-          await call('POST', first ? '/api/setup' : '/api/login', { password: pw.value });
+          await call('POST', first ? '/api/setup' : '/api/login', first ? { password: pw.value, code: code.value } : { password: pw.value });
           ui.session = { setup: true, authed: true };
           await call('GET', '/api/state');
           render();
@@ -479,11 +538,13 @@ function viewAuth() {
     },
     h('h3', {}, first ? 'Create a password' : 'Sign in'),
     first && h('p', { class: 'muted' }, 'This is the first visit. Choose the password that will protect your list (at least 8 characters).'),
+    first && h('label', { class: 'field', for: 'setup-code' }, 'Setup code', code),
+    first && h('p', { class: 'muted small' }, 'The 6-digit code is printed in the server log when the app starts (in Coolify: the app’s Logs tab).'),
     h('label', { class: 'field', for: 'password' }, 'Password', pw),
     h('button', { class: 'btn primary', type: 'submit' }, first ? 'Create password' : 'Sign in'),
     msg,
   );
-  setTimeout(() => pw.focus());
+  setTimeout(() => (first ? code : pw).focus());
   return form;
 }
 

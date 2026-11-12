@@ -40,7 +40,7 @@ export function buildIcs(shows, now = Date.now()) {
       lines.push(`SUMMARY:${esc(`${show.title} – ${ep.label}`)}`);
       const desc = [ep.name, where && `Streams on: ${where}`].filter(Boolean).join('\n');
       if (desc) lines.push(`DESCRIPTION:${esc(desc)}`);
-      if (show.url) lines.push(`URL:${show.url}`);
+      if (/^https?:\/\/[^\s]+$/.test(show.url || '')) lines.push(`URL:${show.url}`);
       lines.push('END:VEVENT');
     }
   }

@@ -22,8 +22,10 @@ around the clock, and sends the alerts, so nothing has to be open on your PC.
 - **Streaming services** – each show is tagged with where it streams. Your services
   (Crunchyroll, HIDIVE and Prime Video by default) are highlighted, and shows that
   are on none of them are flagged.
-- **One password** – the first visit asks you to create it; after that the list is
-  only reachable when signed in.
+- **One password** – the first visit asks you to create it, using a one-time setup
+  code printed in the server log. After that the list is only reachable when signed
+  in. You can change the password, sign other devices out, and replace the calendar
+  feed address under *Settings*.
 
 ## Run it
 
@@ -38,8 +40,9 @@ docker build -t show-tracker .
 docker run -d -p 3000:3000 -v show-tracker-data:/data show-tracker
 ```
 
-Put it behind HTTPS (Coolify's proxy does this) and open it straight away to set
-the password – until one is set, whoever visits first gets to choose it.
+Put it behind HTTPS (Coolify's proxy does this). On the first visit you are asked
+for the 6-digit setup code from the server log (`No password set yet. Setup code
+for the first visit: …`), so nobody else can claim a fresh install.
 
 ### Locally
 
