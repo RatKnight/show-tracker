@@ -130,23 +130,26 @@ function weekStart() {
   return 0;
 }
 
-const REGIONS = [
-  ['US', 'United States'],
-  ['CA', 'Canada'],
-  ['GB', 'United Kingdom'],
-  ['IE', 'Ireland'],
-  ['AU', 'Australia'],
-  ['NZ', 'New Zealand'],
-  ['DE', 'Germany'],
-  ['FR', 'France'],
-  ['ES', 'Spain'],
-  ['IT', 'Italy'],
-  ['NL', 'Netherlands'],
-  ['SE', 'Sweden'],
-  ['BR', 'Brazil'],
-  ['MX', 'Mexico'],
-  ['JP', 'Japan'],
-];
+// Every country the availability data covers. Names come from the browser, in
+// the viewer's own language, so the list needs no translations of its own.
+const REGION_CODES =
+  'AD AE AG AL AO AR AT AU AZ BA BB BE BF BG BH BM BO BR BS BY BZ CA CD CH CI CL CM CO CR CU CV CY CZ DE DK DO DZ EC EE EG ES FI FJ FR GB GF GH GI GP GQ GR GT GY HK HN HR HU ID IE IL IN IQ IS IT JM JO JP KE KR KW LB LC LI LT LU LV LY MA MC MD ME MG MK ML MT MU MW MX MY MZ NE NG NI NL NO NZ OM PA PE PF PG PH PK PL PS PT PY QA RO RS RU SA SC SE SG SI SK SM SN SV TC TD TH TN TR TT TW TZ UA UG US UY VA VE XK YE ZA ZM ZW'.split(' ');
+const REGIONS = (() => {
+  let names = null;
+  try {
+    names = new Intl.DisplayNames(undefined, { type: 'region' });
+  } catch {
+    /* very old browser: fall back to the codes */
+  }
+  const nameOf = (code) => {
+    try {
+      return names?.of(code) || code;
+    } catch {
+      return code;
+    }
+  };
+  return REGION_CODES.map((code) => [code, nameOf(code)]).sort((x, y) => x[1].localeCompare(y[1]));
+})();
 
 // ---------------------------------------------------------------- components
 
