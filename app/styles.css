@@ -286,3 +286,4 @@ a.btn { text-decoration: none; display: inline-block; }
 .row.nested { margin-left: 28px; background: var(--panel-2); }
 .row.series .title { font-weight: 700; }
 .badge.tickets { color: var(--accent); border-color: var(--accent); }
+.sub-head { font-size: 14px; margin: 18px 0 0; }

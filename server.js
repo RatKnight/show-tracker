@@ -222,7 +222,12 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     users: users()
       .map((x) => ({ id: x.id, username: x.username, admin: x.admin, createdAt: x.createdAt, mfa: hasMfa(x) }))
       .sort((a, b) => a.createdAt - b.createdAt),
-    pendingInvites: Object.values(data.invites).filter((i) => i.expiresAt > now()).length,
+    // Unused invites. Only a hash of each link is kept, so the link itself cannot
+    // be shown again; the id is a short prefix of that hash, enough to revoke it.
+    invites: Object.entries(data.invites)
+      .filter(([, i]) => i.expiresAt > now())
+      .map(([hash, i]) => ({ id: hash.slice(0, 16), note: i.note || '', createdAt: i.createdAt || null, expiresAt: i.expiresAt }))
+      .sort((a, b) => a.expiresAt - b.expiresAt),
   });
   const seasonCache = new Map();
   /** Movie features need a TMDB key on the server. */
@@ -429,10 +434,22 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           return reply(200, adminView());
 
         case 'POST /api/admin/invites': {
+          const body = req.headers['content-type'] ? await readJson(req) : {};
+          const note = typeof body.note === 'string' ? body.note.trim().slice(0, 60) : '';
+          if (Object.keys(data.invites).length >= 100) throw new HttpError(400, 'Too many unused invites. Remove some first.');
           const token = newToken();
-          data.invites[tokenHash(token)] = { expiresAt: now() + 7 * DAY_MS };
+          data.invites[tokenHash(token)] = { note, createdAt: now(), expiresAt: now() + 7 * DAY_MS };
           store.save();
           return reply(200, { token, ...adminView() });
+        }
+
+        case 'DELETE /api/admin/invites': {
+          const id = url.searchParams.get('id') || '';
+          const hash = /^[0-9a-f]{16}$/.test(id) ? Object.keys(data.invites).find((h) => h.startsWith(id)) : null;
+          if (!hash) throw new HttpError(400, 'Unknown invite.');
+          delete data.invites[hash];
+          store.save();
+          return reply(200, adminView());
         }
 
         case 'POST /api/admin/reset': {
