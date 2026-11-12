@@ -23,6 +23,9 @@ import {
   pendingUser,
   newRecoveryCodes,
   recoveryHash,
+  adminCookie,
+  clearAdminCookie,
+  adminUnlocked,
 } from './server/auth.js';
 import { newChallenge, creationOptions, requestOptions, verifyRegistration, verifyAssertion } from './server/webauthn.js';
 import { sendAlerts, sendDiscordFile, validateChannels } from './server/notify.js';
@@ -412,7 +415,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     }
 
     if (route === 'POST /api/logout') {
-      res.setHeader('Set-Cookie', [clearCookie(), clearPendingCookie()]);
+      res.setHeader('Set-Cookie', [clearCookie(), clearPendingCookie(), clearAdminCookie()]);
       return reply(200, { ok: true });
     }
 
@@ -523,6 +526,47 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
     if (url.pathname.startsWith('/api/admin/')) {
       if (!u.admin) throw new HttpError(403, 'Only an admin can do that.');
+
+      // The admin pages open only after the admin has confirmed it is them, once
+      // per browser session: with a passkey (or a recovery code) when they have
+      // one, otherwise with their password.
+      if (route === 'GET /api/admin/unlock') {
+        if (adminUnlocked(req.headers.cookie, data.secret, u, now())) return reply(200, { unlocked: true });
+        return reply(200, hasMfa(u) ? { unlocked: false, method: 'passkey', options: requestOptions({ rpId: siteOf(req).rpId, challenge: setChallenge(`admin:${u.id}`), allow: u.passkeys }) } : { unlocked: false, method: 'password' });
+      }
+      if (route === 'POST /api/admin/unlock') {
+        guardAttempts(req);
+        const body = await readJson(req);
+        const refuse = (message) => {
+          noteFailure(req);
+          throw new HttpError(403, message);
+        };
+        if (!hasMfa(u)) {
+          if (!checkPassword(body.password, u.auth)) refuse('That password is not right.');
+        } else if (typeof body.code === 'string') {
+          const hash = recoveryHash(body.code);
+          const at = u.recoveryCodes.findIndex((h) => safeEqual(h, hash));
+          if (at < 0) refuse('That recovery code is not valid.');
+          u.recoveryCodes.splice(at, 1); // each code works once
+          store.save();
+        } else {
+          const credential = u.passkeys.find((k) => k.id === body.response?.id);
+          try {
+            if (!credential) throw new Error('That passkey is not registered for this account.');
+            const { origin, rpId } = siteOf(req);
+            credential.signCount = verifyAssertion({ response: body.response, challenge: takeChallenge(`admin:${u.id}`), origin, rpId, credential }).signCount;
+            store.save();
+          } catch (e) {
+            refuse(e.message);
+          }
+        }
+        return reply(200, { unlocked: true }, { 'Set-Cookie': adminCookie(data.secret, u, req.headers.cookie, secure, now()) });
+      }
+      if (!adminUnlocked(req.headers.cookie, data.secret, u, now())) {
+        res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...securityHeaders(req) });
+        return res.end(JSON.stringify({ error: 'Confirm it is you to open the admin pages.', locked: true }));
+      }
+
       switch (route) {
         case 'GET /api/admin/users':
           return reply(200, adminView());

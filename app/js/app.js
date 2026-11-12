@@ -21,6 +21,7 @@ const ui = {
   loading: {},
   link: null, // { kind: 'invite' | 'reset' | 'share', token, ... } from the page address
   admin: null, // { users, invites, encrypted, mail, movies }
+  adminGate: null, // { unlocked, method, options }: whether this session may open the admin pages
   shared: null, // someone else's shared list
   forgot: false, // showing the forgot-password form
   info: null, // one-off good news shown above the page
@@ -50,6 +51,11 @@ async function call(method, path, body) {
   if (res.status === 401 && ui.session?.authed) {
     ui.session = { setup: true, authed: false };
     render();
+  }
+  if (res.status === 403 && json?.locked && ui.adminGate?.unlocked) {
+    // The admin confirmation ran out (12 hours): ask again.
+    ui.adminGate = null;
+    delete ui.loading.adminGate;
   }
   if (!res.ok) {
     const err = new Error(json?.error || `Request failed (${res.status})`);
@@ -1436,7 +1442,81 @@ function viewProfile() {
 }
 
 /** Site administration. Only reachable by admins; the server enforces it too. */
+/** Shown in place of the admin pages until the admin has confirmed it is them. */
+function viewAdminLocked() {
+  const gate = ui.adminGate;
+  const msg = h('p', { class: 'error small', role: 'alert' });
+  const done = () => {
+    ui.adminGate = { unlocked: true };
+    ui.admin = null;
+    delete ui.loading.admin;
+    render();
+  };
+  const fail = (e) => {
+    msg.textContent = e.body || !e.name ? e.message : passkeyError(e);
+    // A passkey challenge works once: fetch a fresh one for the next try.
+    if (gate.method === 'passkey') call('GET', '/api/admin/unlock').then((g) => (ui.adminGate = g), () => {});
+  };
+  if (gate.method === 'password') {
+    const pw = h('input', { type: 'password', id: 'admin-password', autocomplete: 'current-password', required: true });
+    return h(
+      'form',
+      {
+        class: 'card auth',
+        onsubmit: (e) => {
+          e.preventDefault();
+          call('POST', '/api/admin/unlock', { password: pw.value }).then(done, fail);
+        },
+      },
+      h('h3', {}, 'Confirm it’s you'),
+      h('p', { class: 'muted' }, 'The admin pages ask for this once each time you sign in. Your account has no passkey yet, so it is your password for now. Add a passkey under Profile and this step will use it instead.'),
+      h('label', { class: 'field', for: 'admin-password' }, 'Password', pw),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Open admin pages'),
+      msg,
+    );
+  }
+  const code = h('input', { type: 'text', id: 'admin-code', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', placeholder: 'xxxxx-xxxxx' });
+  return h(
+    'div',
+    { class: 'card auth' },
+    h('h3', {}, 'Confirm it’s you'),
+    h('p', { class: 'muted' }, 'The admin pages ask for your passkey once each time you sign in, so a signed-in browser on its own cannot manage other people’s accounts.'),
+    canPasskey()
+      ? h(
+          'button',
+          {
+            class: 'btn primary',
+            type: 'button',
+            id: 'admin-passkey',
+            onclick: () =>
+              signWithPasskey(ui.adminGate.options)
+                .then((response) => call('POST', '/api/admin/unlock', { response }))
+                .then(done, fail),
+          },
+          'Use my passkey',
+        )
+      : h('p', { class: 'error small' }, 'This browser does not support passkeys. Use a recovery code.'),
+    h(
+      'form',
+      {
+        class: 'stack',
+        onsubmit: (e) => {
+          e.preventDefault();
+          call('POST', '/api/admin/unlock', { code: code.value }).then(done, fail);
+        },
+      },
+      h('label', { class: 'field', for: 'admin-code' }, 'No passkey on this device? Enter a recovery code', code),
+      h('button', { class: 'btn', type: 'submit' }, 'Use recovery code'),
+    ),
+    msg,
+  );
+}
+
 function viewAdmin() {
+  // First find out whether this session has been confirmed for admin work.
+  load('adminGate', async () => (ui.adminGate = await call('GET', '/api/admin/unlock')));
+  if (!ui.adminGate) return empty(ui.loading.adminGate === 'busy' ? 'Loading…' : 'Could not load', ui.loading.adminGate === 'busy' ? '' : ui.loading.adminGate || '');
+  if (!ui.adminGate.unlocked) return viewAdminLocked();
   const a = ui.admin;
   const site = a?.site || {};
   const toggle = (key, label) =>

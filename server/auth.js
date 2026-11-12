@@ -95,3 +95,32 @@ export function newRecoveryCodes() {
 }
 /** Codes are compared without regard to case, spaces or the dash. */
 export const recoveryHash = (code) => tokenHash(String(code ?? '').toLowerCase().replace(/[^a-z0-9]/g, ''));
+
+// ---- admin unlock
+//
+// Being signed in is not enough to open the admin pages: the admin confirms
+// with their passkey once per browser session. That confirmation is this
+// cookie, tied to the sign-in session it was given to, and gone when the
+// browser closes (or after 12 hours).
+
+const ADMIN = 'st_admin';
+const ADMIN_MS = 12 * 60 * 60 * 1000;
+const sessionValue = (cookieHeader) => (/(?:^|;\s*)st_session=([\w.]+)/.exec(cookieHeader || '') || [])[1] || '';
+const adminMac = (secret, user, session, expires) => createHmac('sha256', `${secret}:admin:${user.sessionKey}`).update(`${session}|${expires}`).digest('hex');
+
+export function adminCookie(secret, user, cookieHeader, secure, now = Date.now()) {
+  const expires = now + ADMIN_MS;
+  return `${ADMIN}=${expires}.${adminMac(secret, user, sessionValue(cookieHeader), expires)}; Path=/api/admin; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
+}
+
+export function clearAdminCookie() {
+  return `${ADMIN}=; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=0`;
+}
+
+/** Has this sign-in session been confirmed for admin work? */
+export function adminUnlocked(cookieHeader, secret, user, now = Date.now()) {
+  const match = /(?:^|;\s*)st_admin=(\d+)\.([0-9a-f]+)/.exec(cookieHeader || '');
+  const session = sessionValue(cookieHeader);
+  if (!match || !session || Number(match[1]) <= now) return false;
+  return safeEqual(match[2], adminMac(secret, user, session, match[1]));
+}
