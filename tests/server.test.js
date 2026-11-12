@@ -877,7 +877,8 @@ test('http: e-mail confirmation and forgot-password', async (t) => {
   // The admin roster never includes addresses.
   await fresh.unlockAdmin('brand-new-password');
   const rosterText = JSON.stringify((await fresh.req('GET', '/api/admin/users')).body);
-  assert.ok(rosterText.includes('"ann"') && !rosterText.includes('example.com'));
+  // No address of any kind in what the admin sees: checked by the "@" every address has.
+  assert.ok(rosterText.includes('"ann"') && !rosterText.includes('@'));
 });
 
 test('http: e-mail features are closed when mail is not configured', async (t) => {
