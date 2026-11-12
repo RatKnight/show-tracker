@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Show Tracker Sync",
-  "version": "0.2.0",
-  "description": "Marks episodes you watched on Crunchyroll as watched in your own Show Tracker, and suggests shows from your history and watchlist.",
+  "version": "0.3.0",
+  "description": "Marks episodes you watched on Crunchyroll and HIDIVE as watched in your own Show Tracker, and suggests shows from your history and watchlist.",
   "browser_specific_settings": {
     "gecko": {
       "id": "show-tracker-sync@ratknight.com",
@@ -16,7 +16,8 @@
     "storage"
   ],
   "host_permissions": [
-    "https://www.crunchyroll.com/*"
+    "https://www.crunchyroll.com/*",
+    "https://www.hidive.com/*"
   ],
   "optional_host_permissions": [
     "https://*/*",
@@ -31,7 +32,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.crunchyroll.com/*"
+        "https://www.crunchyroll.com/*",
+        "https://www.hidive.com/*"
       ],
       "js": [
         "parse.js",

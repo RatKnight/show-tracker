@@ -20,8 +20,8 @@ $('form').addEventListener('submit', async (e) => {
   }
   const token = $('token').value.trim();
   // The browser asks you to let the extension talk to that one address.
-  // (Crunchyroll is included because some Firefox versions do not grant it at install.)
-  const allowed = await api.permissions.request({ origins: [`${origin}/*`, 'https://www.crunchyroll.com/*'] }).catch(() => false);
+  // (The streaming sites are included because some Firefox versions do not grant them at install.)
+  const allowed = await api.permissions.request({ origins: [`${origin}/*`, 'https://www.crunchyroll.com/*', 'https://www.hidive.com/*'] }).catch(() => false);
   if (!allowed) return say('Permission to contact that address was not given.', 'error');
   say('Testing…');
   try {

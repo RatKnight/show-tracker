@@ -2,7 +2,7 @@
 // Crunchyroll page and reports them with your personal access token.
 const api = globalThis.browser ?? globalThis.chrome;
 
-async function report(items) {
+async function report(items, provider = 'crunchyroll') {
   const { site, token } = await api.storage.local.get(['site', 'token']);
   if (!site || !token) return { error: 'not-configured' };
   let res;
@@ -10,7 +10,7 @@ async function report(items) {
     res = await fetch(`${site}/api/ext/watched`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: 'crunchyroll', items }),
+      body: JSON.stringify({ provider, items }),
     });
   } catch {
     return { error: 'could not reach your Show Tracker. Check the address in the extension settings.' };
@@ -52,6 +52,6 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type !== 'watched' || !Array.isArray(message.items)) return false;
-  report(message.items).then(sendResponse, (e) => sendResponse({ error: e.message }));
+  report(message.items, message.provider === 'hidive' ? 'hidive' : 'crunchyroll').then(sendResponse, (e) => sendResponse({ error: e.message }));
   return true; // the reply comes later
 });

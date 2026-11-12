@@ -46,6 +46,10 @@ export function matchEpisode(item, shows) {
   if (item.season != null) {
     const bySeason = cands.filter((s) => s.franchise.index === item.season && fits(s, e));
     if (bySeason.length === 1) return { show: bySeason[0], number: e };
+    // Some sites name the season but keep counting ("Season 2, E21"): take the
+    // earlier seasons' episodes off.
+    const counted = cands.filter((s) => s.franchise.index === item.season && s.franchise.offset > 0 && fits(s, e - s.franchise.offset));
+    if (!bySeason.length && counted.length === 1) return { show: counted[0], number: e - counted[0].franchise.offset };
   } else {
     // No season named: the number counts through every earlier season.
     const straight = cands.filter((s) => fits(s, e - s.franchise.offset));

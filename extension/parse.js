@@ -54,3 +54,56 @@ function parseCrunchyrollWatchlist(root) {
   }
   return [...names];
 }
+
+// ---------------------------------------------------------------- HIDIVE
+//
+// HIDIVE's history page does not say which show an episode belongs to; only a
+// show's own page does. So a show page is read for two things at once: which
+// video is which episode (remembered, so history entries can be placed later),
+// and which of its episodes are finished.
+
+/** Is this episode card finished? `bare` is what a card without a progress bar means. */
+function hidiveFinished(card, bare) {
+  const bar = card.querySelector('.card-progress__bar');
+  if (!bar) return bare;
+  const width = parseFloat((/width:\s*([\d.]+)%/.exec(bar.getAttribute('style') || '') || [])[1]);
+  if (width >= 90) return true;
+  // "2 minutes 49 seconds remaining": only the credits are left.
+  const left = /^(\d+) minutes? /.exec(card.querySelector('.card-progress')?.getAttribute('aria-label') || '');
+  return left !== null && Number(left[1]) <= 3;
+}
+
+function hidiveCards(root, type) {
+  const out = [];
+  for (const link of root.querySelectorAll(`a[data-content-type="${type}"][href*="/video/"]`)) {
+    const videoId = (/\/video\/(\d+)/.exec(link.getAttribute('href')) || [])[1];
+    const title = (link.querySelector('.card-title__title')?.textContent || link.getAttribute('aria-label') || '').trim();
+    const number = /^E(\d+)\b/.exec(title);
+    if (videoId && number) out.push({ link, videoId, episode: Number(number[1]) });
+  }
+  return out;
+}
+
+/**
+ * A show's page: { series, season, episodes: [{ videoId, episode, watched }] },
+ * or null when this is not one.
+ */
+/* exported parseHidiveSeason */
+function parseHidiveSeason(root) {
+  const cards = hidiveCards(root, 'SEASON_VOD');
+  if (!cards.length) return null;
+  const text = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
+  const series = text(root.querySelector('[data-testid*="hero-heading-container"]')) || text(root.querySelector('h1')).replace(/\s*-\s*HIDIVE$/i, '');
+  if (!series) return null;
+  const picked = /^Season (\d+) selected$/i.exec(root.querySelector('button[aria-label$=" selected"]')?.getAttribute('aria-label') || '');
+  // On a show page, a card without a bar has not been started.
+  return { series, season: picked ? Number(picked[1]) : null, episodes: cards.map((c) => ({ videoId: c.videoId, episode: c.episode, watched: hidiveFinished(c.link, false) })) };
+}
+
+/** The history page: [{ videoId, episode, watched }]. The show is not named here. */
+/* exported parseHidiveHistory */
+function parseHidiveHistory(root) {
+  if (!root.querySelector('.history-group')) return [];
+  // In history, a card without a bar is one that was watched to the end.
+  return hidiveCards(root.querySelector('.history-group').parentElement || root, 'VOD').map((c) => ({ videoId: c.videoId, episode: c.episode, watched: hidiveFinished(c.link, true) }));
+}
