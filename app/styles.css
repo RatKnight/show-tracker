@@ -287,3 +287,8 @@ a.btn { text-decoration: none; display: inline-block; }
 .row.series .title { font-weight: 700; }
 .badge.tickets { color: var(--accent); border-color: var(--accent); }
 .sub-head { font-size: 14px; margin: 18px 0 0; }
+
+/* ---------- password confirmation ---------- */
+dialog.ask { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); padding: 20px; width: min(380px, calc(100vw - 32px)); }
+dialog.ask::backdrop { background: rgb(0 0 0 / .55); }
+dialog.ask h3 { font-size: 18px; margin-bottom: 6px; }

@@ -529,6 +529,15 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
     // ---------------------------------------------------------- signed in
 
+    /** For changes that weaken an account: the current password, again. */
+    const confirmPassword = (password) => {
+      guardAttempts(req);
+      if (!checkPassword(password, u.auth)) {
+        noteFailure(req);
+        throw new HttpError(403, 'That password is not right.');
+      }
+    };
+
     switch (route) {
       case 'GET /api/state':
         return reply(200, publicState(u));
@@ -729,8 +738,11 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         return reply(200, { ...publicState(u), recoveryCodes });
       }
 
-      case 'DELETE /api/passkeys': {
-        const id = url.searchParams.get('id') || '';
+      // Removing a passkey weakens the account, so a signed-in browser alone is not
+      // enough: the password is asked for again.
+      case 'POST /api/passkeys/remove': {
+        const { id, password } = await readJson(req);
+        confirmPassword(password);
         if (!u.passkeys.some((k) => k.id === id)) throw new HttpError(400, 'Unknown passkey.');
         u.passkeys = u.passkeys.filter((k) => k.id !== id);
         if (!hasMfa(u)) u.recoveryCodes = []; // protection is off again
@@ -746,8 +758,10 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         return reply(200, { ...publicState(u), recoveryCodes });
       }
 
+      // The recovery address can reset the password, so changing it needs the password too.
       case 'PUT /api/account/email': {
-        const { email } = await readJson(req);
+        const { email, password } = await readJson(req);
+        confirmPassword(password);
         if (email === '' || email === null) {
           u.email = '';
           u.pendingEmail = null;

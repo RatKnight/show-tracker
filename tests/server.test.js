@@ -13,7 +13,7 @@ import { buildBackup, readBackup, writeSnapshot } from '../server/backup.js';
 import { createMailer, cleanEmail } from '../server/mail.js';
 import { matchEpisode, normTitle } from '../server/extmatch.js';
 import { generateKeyPairSync, createHash, sign as cryptoSign, randomBytes } from 'node:crypto';
-import { validateChannels, parseNtfy, ntfyPayloads, discordPayloads } from '../server/notify.js';
+import { validateChannels, parseNtfy, ntfyPayloads, discordPayloads, isPrivateAddress, sendAlerts } from '../server/notify.js';
 import { hashPassword, checkPassword, cleanUsername, sessionCookie, sessionUser, tokenHash } from '../server/auth.js';
 import { DAY } from '../app/js/core.js';
 
@@ -126,10 +126,19 @@ test('channel validation and payloads', () => {
   assert.match(validateChannels({ discordWebhook: 'https://evil.example/api/webhooks/1/x' }), /Discord/);
   assert.deepEqual(parseNtfy('https://ntfy.example.com/shows/'), { server: 'https://ntfy.example.com', topic: 'shows' });
 
+  for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', 'fd00::1', 'fe80::1', '::ffff:10.0.0.1']) assert.ok(isPrivateAddress(ip), ip);
+  for (const ip of ['8.8.8.8', '172.32.0.1', '100.128.0.1', '2606:4700::1111', '::ffff:8.8.8.8']) assert.ok(!isPrivateAddress(ip), ip);
   const msgs = Array.from({ length: 12 }, (_, i) => ({ title: `T${i}`, body: 'b', url: 'https://x', image: null, at: 0 }));
   assert.equal(ntfyPayloads('https://ntfy.sh/t', msgs)[0].topic, 't');
   const d = discordPayloads(msgs);
   assert.deepEqual(d.map((p) => p.embeds.length), [10, 2]);
+});
+
+test('alerts are not delivered to an ntfy address on a private network', async () => {
+  const message = [{ title: 'T', body: 'b', at: 0 }];
+  for (const url of ['https://127.0.0.1/topic', 'https://10.0.0.5/topic', 'https://[::1]/topic', 'https://localhost/topic']) {
+    assert.match((await sendAlerts({ ntfyUrl: url, discordWebhook: '' }, message))[0], /^ntfy: that address is on a private network/, url);
+  }
 });
 
 test('ics feed', () => {
@@ -775,8 +784,10 @@ test('http: e-mail confirmation and forgot-password', async (t) => {
   assert.equal(outbox.length, 0);
 
   // An address only counts once its link has been opened.
-  assert.equal((await ann.req('PUT', '/api/account/email', { email: 'not an address' })).status, 400);
-  const pending = (await ann.req('PUT', '/api/account/email', { email: 'ann@example.com' })).body;
+  assert.equal((await ann.req('PUT', '/api/account/email', { email: 'not an address', password: 'password-ann' })).status, 400);
+  assert.equal((await ann.req('PUT', '/api/account/email', { email: 'ann@example.com' })).status, 403, 'needs the password');
+  assert.equal((await ann.req('PUT', '/api/account/email', { email: 'ann@example.com', password: 'wrong' })).status, 403);
+  const pending = (await ann.req('PUT', '/api/account/email', { email: 'ann@example.com', password: 'password-ann' })).body;
   assert.deepEqual([pending.me.email, pending.me.pendingEmail], ['', 'ann@example.com']);
   assert.equal(outbox.length, 1);
   assert.deepEqual([outbox[0].to, outbox[0].text.includes('https://shows.example/#confirm=')], ['ann@example.com', true]);
@@ -810,7 +821,7 @@ test('http: e-mail confirmation and forgot-password', async (t) => {
   assert.equal((await pest.req('POST', '/api/forgot', { identifier: 'ann' })).status, 429);
 
   // Removing the address switches recovery by mail off for the account.
-  assert.equal((await fresh.req('PUT', '/api/account/email', { email: '' })).body.me.email, '');
+  assert.equal((await fresh.req('PUT', '/api/account/email', { email: '', password: 'brand-new-password' })).body.me.email, '');
   // The admin roster never includes addresses.
   assert.ok(!JSON.stringify((await fresh.req('GET', '/api/admin/users')).body).includes('example.com'));
 });
@@ -820,7 +831,7 @@ test('http: e-mail features are closed when mail is not configured', async (t) =
   const ann = client();
   await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
   assert.equal((await ann.req('POST', '/api/forgot', { identifier: 'ann' })).status, 404);
-  assert.equal((await ann.req('PUT', '/api/account/email', { email: 'ann@example.com' })).status, 400);
+  assert.equal((await ann.req('PUT', '/api/account/email', { email: 'ann@example.com', password: 'password-ann' })).status, 400);
   assert.equal((await ann.req('GET', '/api/state')).body.mail, false);
 });
 
@@ -978,8 +989,12 @@ test('http: passkeys as a second sign-in step, recovery codes, and no bypass by 
   assert.equal((await bob.req('GET', '/api/state')).status, 401, 'cleared account is signed out');
   assert.equal((await bob.req('POST', '/api/login', { username: 'bob', password: 'password-bob' })).body.ok, true, 'and signs in with the password alone again');
 
-  await lost.req('DELETE', `/api/passkeys?id=${key.id}`);
-  const off = (await lost.req('DELETE', `/api/passkeys?id=${phone.id}`)).body;
+  // Removing a passkey needs the password again, not just a signed-in browser.
+  assert.equal((await lost.req('POST', '/api/passkeys/remove', { id: key.id })).status, 403);
+  assert.equal((await lost.req('POST', '/api/passkeys/remove', { id: key.id, password: 'password-ann' })).status, 403, 'the old password');
+  assert.equal((await lost.req('GET', '/api/state')).body.me.passkeys.length, 2);
+  await lost.req('POST', '/api/passkeys/remove', { id: key.id, password: 'thief-password' });
+  const off = (await lost.req('POST', '/api/passkeys/remove', { id: phone.id, password: 'thief-password' })).body;
   assert.deepEqual([off.me.passkeys, off.me.recoveryCodesLeft], [[], 0]);
 });
 
