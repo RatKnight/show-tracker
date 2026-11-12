@@ -1,0 +1,11 @@
+{
+  "name": "show-tracker",
+  "version": "0.1.0",
+  "description": "Track upcoming anime and TV episode releases with a calendar and alerts.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Show Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%237c5cff'/><path d='M12 9v14l12-7z' fill='white'/></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">▶</span>
+      <h1>Show Tracker</h1>
+    </div>
+    <form class="search" id="search-form" role="search" autocomplete="off">
+      <select id="search-source" aria-label="What to search">
+        <option value="anime">Anime</option>
+        <option value="tv">TV</option>
+      </select>
+      <input id="search-input" type="search" placeholder="Add a show… type a title" aria-label="Search for a show to add">
+      <div class="results" id="search-results" hidden></div>
+    </form>
+    <div class="top-actions">
+      <span class="muted small" id="refresh-status"></span>
+      <button type="button" class="btn" id="refresh-btn">Refresh</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs" aria-label="Views"></nav>
+  <div class="banner" id="banner" hidden></div>
+  <main id="view"></main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
