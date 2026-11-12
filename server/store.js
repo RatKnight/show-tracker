@@ -33,6 +33,8 @@ export function makeUser(fields) {
     shareToken: null,
     email: '', // confirmed address for password recovery, optional
     pendingEmail: null, // { address, hash, expiresAt } until its link is clicked
+    passkeys: [], // { id, name, publicKey, alg, signCount, transports, createdAt }
+    recoveryCodes: [], // sha256 of each unused one-time code
     shows: {}, // show key -> { addedAt }; the show itself lives in the shared catalog
     alerts: [],
     alerted: [],

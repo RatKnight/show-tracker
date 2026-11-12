@@ -11,6 +11,7 @@ import { computeDiscover } from '../server/discover.js';
 import { localClock, inQuietHours, summarize } from '../server/timing.js';
 import { buildBackup, readBackup, writeSnapshot } from '../server/backup.js';
 import { createMailer, cleanEmail } from '../server/mail.js';
+import { generateKeyPairSync, createHash, sign as cryptoSign, randomBytes } from 'node:crypto';
 import { validateChannels, parseNtfy, ntfyPayloads, discordPayloads } from '../server/notify.js';
 import { hashPassword, checkPassword, cleanUsername, sessionCookie, sessionUser, tokenHash } from '../server/auth.js';
 import { DAY } from '../app/js/core.js';
@@ -584,7 +585,7 @@ test('http: accounts are isolated; invites, resets, sharing and admin limits', a
   }
   const roster = (await ann.req('GET', '/api/admin/users')).body;
   assert.deepEqual(roster.users.map((x) => [x.username, x.admin]), [['ann', true], ['bob', false]]);
-  assert.deepEqual(Object.keys(roster.users[1]).sort(), ['admin', 'createdAt', 'id', 'username'], 'no list data in the admin view');
+  assert.deepEqual(Object.keys(roster.users[1]).sort(), ['admin', 'createdAt', 'id', 'mfa', 'username'], 'no list data in the admin view');
   assert.equal(roster.encrypted, false);
 
   // Sharing is off until switched on, shows titles only, and can be withdrawn.
@@ -728,4 +729,163 @@ test('http: e-mail features are closed when mail is not configured', async (t) =
   assert.equal((await ann.req('POST', '/api/forgot', { identifier: 'ann' })).status, 404);
   assert.equal((await ann.req('PUT', '/api/account/email', { email: 'ann@example.com' })).status, 400);
   assert.equal((await ann.req('GET', '/api/state')).body.mail, false);
+});
+
+// ---------------------------------------------------------------- passkeys
+
+/** A software authenticator: makes the same responses a browser would send. */
+function fakeAuthenticator(origin, rpId, { rsa = false } = {}) {
+  const { publicKey, privateKey } = rsa ? generateKeyPairSync('rsa', { modulusLength: 2048 }) : generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const id = randomBytes(16);
+  const b64u = (b) => Buffer.from(b).toString('base64url');
+  const rpHash = createHash('sha256').update(rpId).digest();
+  const authData = (flags, count, attested) => {
+    const head = Buffer.concat([rpHash, Buffer.from([flags]), Buffer.from([0, 0, 0, count])]);
+    const len = Buffer.alloc(2);
+    len.writeUInt16BE(id.length);
+    return attested ? Buffer.concat([head, Buffer.alloc(16), len, id, Buffer.from('a0', 'hex')]) : head;
+  };
+  const client = (type, challenge, over = {}) => Buffer.from(JSON.stringify({ type, challenge, origin, crossOrigin: false, ...over }));
+  let count = 0;
+  return {
+    id: b64u(id),
+    create(options, over = {}) {
+      return {
+        id: b64u(id),
+        clientDataJSON: b64u(client('webauthn.create', options.challenge, over)),
+        authenticatorData: b64u(authData(0x45, 0, true)),
+        publicKey: b64u(publicKey.export({ format: 'der', type: 'spki' })),
+        alg: rsa ? -257 : -7,
+        transports: ['internal'],
+      };
+    },
+    get(options, over = {}) {
+      const cdj = client('webauthn.get', options.challenge, over);
+      const ad = authData(0x05, ++count, false);
+      const signature = cryptoSign('sha256', Buffer.concat([ad, createHash('sha256').update(cdj).digest()]), privateKey);
+      return { id: b64u(id), clientDataJSON: b64u(cdj), authenticatorData: b64u(ad), signature: b64u(signature) };
+    },
+  };
+}
+
+test('http: passkeys as a second sign-in step, recovery codes, and no bypass by reset', async (t) => {
+  const ORIGIN = 'https://shows.example';
+  const outbox = [];
+  const mailer = { enabled: true, link: (k, tok) => `${ORIGIN}/#${k}=${tok}`, send: async (m) => void outbox.push(m) };
+  const { setupCode, store, client } = await serve(t, { publicUrl: ORIGIN, mailer });
+  const ann = client('198.51.100.1');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  assert.deepEqual((await ann.req('GET', '/api/state')).body.me.passkeys, []);
+
+  // Registering: the challenge is single use and the origin must be ours.
+  const key = fakeAuthenticator(ORIGIN, 'shows.example');
+  let opts = (await ann.req('POST', '/api/passkeys/options')).body;
+  assert.deepEqual([opts.rp.id, opts.user.name, opts.attestation], ['shows.example', 'ann', 'none']);
+  assert.equal((await ann.req('POST', '/api/passkeys', { name: 'Laptop', response: key.create(opts, { origin: 'https://evil.example' }) })).status, 400);
+  assert.equal((await ann.req('POST', '/api/passkeys', { name: 'Laptop', response: key.create(opts) })).status, 400, 'challenge was used up by the failed try');
+  opts = (await ann.req('POST', '/api/passkeys/options')).body;
+  const added = (await ann.req('POST', '/api/passkeys', { name: 'Laptop', response: key.create(opts) })).body;
+  assert.deepEqual(added.me.passkeys.map((k) => k.name), ['Laptop']);
+  assert.equal(added.recoveryCodes.length, 10);
+  assert.match(added.recoveryCodes[0], /^[a-z2-9]{5}-[a-z2-9]{5}$/);
+  assert.equal(added.me.recoveryCodesLeft, 10);
+  assert.ok(!JSON.stringify(store.data.users).includes(added.recoveryCodes[0]), 'recovery codes are stored hashed');
+  assert.ok(!JSON.stringify(added.me).includes('publicKey'));
+
+  // A second passkey (RSA this time) does not reissue recovery codes.
+  const phone = fakeAuthenticator(ORIGIN, 'shows.example', { rsa: true });
+  opts = (await ann.req('POST', '/api/passkeys/options')).body;
+  assert.deepEqual(opts.excludeCredentials.map((c) => c.id), [key.id]);
+  const second = (await ann.req('POST', '/api/passkeys', { name: 'Phone', response: phone.create(opts) })).body;
+  assert.equal(second.recoveryCodes, null);
+  opts = (await ann.req('POST', '/api/passkeys/options')).body;
+  assert.equal((await ann.req('POST', '/api/passkeys', { name: 'Again', response: phone.create(opts) })).status, 409, 'same passkey twice');
+
+  // Signing in now takes two steps; the password alone gives no session.
+  const dev = client('198.51.100.2');
+  const step1 = (await dev.req('POST', '/api/login', { username: 'ann', password: 'password-ann' })).body;
+  assert.equal(step1.mfa, true);
+  assert.deepEqual(step1.options.allowCredentials.map((c) => c.id), [key.id, phone.id]);
+  assert.equal((await dev.req('GET', '/api/state')).status, 401, 'not signed in after the password alone');
+  assert.match(dev.cookie, /^st_pending=/);
+  const pending = dev.cookie;
+
+  // Wrong passkey, wrong site, tampered signature: all refused, each with a fresh challenge.
+  const stranger = fakeAuthenticator(ORIGIN, 'shows.example');
+  let bad = await dev.req('POST', '/api/login/passkey', { response: stranger.get(step1.options) });
+  assert.equal(bad.status, 401);
+  dev.cookie = pending;
+  bad = await dev.req('POST', '/api/login/passkey', { response: fakeAuthenticator('https://evil.example', 'shows.example').get(bad.body.options) });
+  assert.equal(bad.status, 401);
+  dev.cookie = pending;
+  const forged = key.get(bad.body.options);
+  forged.signature = stranger.get(bad.body.options).signature;
+  bad = await dev.req('POST', '/api/login/passkey', { response: forged });
+  assert.equal(bad.status, 401);
+  assert.equal(bad.body.error, 'The passkey signature is not valid.');
+  dev.cookie = pending;
+  const replayOpts = bad.body.options;
+  const good = key.get(replayOpts);
+  assert.equal((await dev.req('POST', '/api/login/passkey', { response: good })).status, 200);
+  assert.equal((await dev.req('GET', '/api/state')).body.me.username, 'ann');
+
+  // The same signed response cannot be replayed, and the second step needs the first.
+  const replay = client('198.51.100.3');
+  replay.cookie = pending;
+  assert.equal((await replay.req('POST', '/api/login/passkey', { response: good })).status, 401);
+  assert.equal((await client('198.51.100.4').req('POST', '/api/login/passkey', { response: good })).status, 401);
+  assert.equal((await client('198.51.100.4').req('POST', '/api/login/recovery', { code: added.recoveryCodes[0] })).status, 401);
+
+  // The RSA passkey works too.
+  const dev2 = client('198.51.100.5');
+  const s2 = (await dev2.req('POST', '/api/login', { username: 'ann', password: 'password-ann' })).body;
+  assert.equal((await dev2.req('POST', '/api/login/passkey', { response: phone.get(s2.options) })).status, 200);
+
+  // Recovery codes: one use each, forgiving about formatting.
+  const lost = client('198.51.100.6');
+  await lost.req('POST', '/api/login', { username: 'ann', password: 'password-ann' });
+  const lostPending = lost.cookie;
+  assert.equal((await lost.req('POST', '/api/login/recovery', { code: 'aaaaa-aaaaa' })).status, 401);
+  lost.cookie = lostPending;
+  const code = added.recoveryCodes[3];
+  const viaCode = await lost.req('POST', '/api/login/recovery', { code: ` ${code.toUpperCase().replace('-', ' ')} ` });
+  assert.deepEqual([viaCode.status, viaCode.body.recoveryCodesLeft], [200, 9]);
+  const again = client('198.51.100.7');
+  await again.req('POST', '/api/login', { username: 'ann', password: 'password-ann' });
+  assert.equal((await again.req('POST', '/api/login/recovery', { code })).status, 401, 'a code works once');
+  const fresh = (await lost.req('POST', '/api/recovery-codes')).body;
+  assert.equal(fresh.me.recoveryCodesLeft, 10);
+  assert.notDeepEqual(fresh.recoveryCodes, added.recoveryCodes);
+
+  // An e-mailed reset link changes the password but does not skip the passkey.
+  store.data.users[added.me.id].email = 'ann@example.com';
+  await client('198.51.100.8').req('POST', '/api/forgot', { identifier: 'ann' });
+  await new Promise((r) => setTimeout(r, 20));
+  const resetToken = /#reset=([\w-]+)/.exec(outbox.at(-1).text)[1];
+  const thief = client('198.51.100.9');
+  const afterReset = await thief.req('POST', '/api/reset', { token: resetToken, password: 'thief-password' });
+  assert.deepEqual([afterReset.status, afterReset.body.mfa], [200, true]);
+  assert.equal((await thief.req('GET', '/api/state')).status, 401, 'a reset link alone does not sign in');
+
+  // The reset signed every device out; Ann gets back in with the new password plus her passkey.
+  assert.equal((await lost.req('GET', '/api/state')).status, 401);
+  const back = (await lost.req('POST', '/api/login', { username: 'ann', password: 'thief-password' })).body;
+  assert.equal((await lost.req('POST', '/api/login/passkey', { response: key.get(back.options) })).status, 200);
+
+  // Admin can clear another person's protection, not snoop on it; removing the last passkey turns it off.
+  const bobInvite = (await lost.req('POST', '/api/admin/invites')).body.token;
+  const bob = client('198.51.100.10');
+  await bob.req('POST', '/api/signup', { token: bobInvite, username: 'bob', password: 'password-bob' });
+  const bobKey = fakeAuthenticator(ORIGIN, 'shows.example');
+  await bob.req('POST', '/api/passkeys', { name: 'Bob key', response: bobKey.create((await bob.req('POST', '/api/passkeys/options')).body) });
+  const roster = (await lost.req('GET', '/api/admin/users')).body.users;
+  assert.deepEqual(roster.map((x) => [x.username, x.mfa]), [['ann', true], ['bob', true]]);
+  assert.equal((await bob.req('POST', '/api/admin/mfa/clear', { id: roster[0].id })).status, 403);
+  assert.equal((await lost.req('POST', '/api/admin/mfa/clear', { id: roster[1].id })).body.users[1].mfa, false);
+  assert.equal((await bob.req('GET', '/api/state')).status, 401, 'cleared account is signed out');
+  assert.equal((await bob.req('POST', '/api/login', { username: 'bob', password: 'password-bob' })).body.ok, true, 'and signs in with the password alone again');
+
+  await lost.req('DELETE', `/api/passkeys?id=${key.id}`);
+  const off = (await lost.req('DELETE', `/api/passkeys?id=${phone.id}`)).body;
+  assert.deepEqual([off.me.passkeys, off.me.recoveryCodesLeft], [[], 0]);
 });

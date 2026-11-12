@@ -8,7 +8,23 @@ import { fileURLToPath } from 'node:url';
 import { SERVICES, animeSeason } from './app/js/core.js';
 import { openStore, makeUser } from './server/store.js';
 import { createTracker } from './server/tracker.js';
-import { hashPassword, checkPassword, cleanUsername, newToken, tokenHash, sessionCookie, clearCookie, sessionUser, safeEqual } from './server/auth.js';
+import {
+  hashPassword,
+  checkPassword,
+  cleanUsername,
+  newToken,
+  tokenHash,
+  sessionCookie,
+  clearCookie,
+  sessionUser,
+  safeEqual,
+  pendingCookie,
+  clearPendingCookie,
+  pendingUser,
+  newRecoveryCodes,
+  recoveryHash,
+} from './server/auth.js';
+import { newChallenge, creationOptions, requestOptions, verifyRegistration, verifyAssertion } from './server/webauthn.js';
 import { sendAlerts, sendDiscordFile, validateChannels } from './server/notify.js';
 import { buildBackup, readBackup } from './server/backup.js';
 import { buildIcs } from './server/ics.js';
@@ -62,7 +78,7 @@ async function readJson(req, limit = 64 * 1024) {
   throw new HttpError(400, 'Invalid JSON.');
 }
 
-export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, mailer = createMailer(), now = Date.now } = {}) {
+export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, mailer = createMailer(), publicUrl = '', now = Date.now } = {}) {
   const store = openStore(dataDir, { dataKey });
   const { data } = store;
   const tracker = createTracker({ store, sources, send, sendFile, now });
@@ -107,6 +123,43 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
   };
   const sendMail = (message) => mailer.send(message).catch((e) => console.error('Mail failed:', e.message));
 
+  // Passkeys are bound to the site's address. Use the configured one when there
+  // is one; otherwise (local use) fall back to the address of the request.
+  let fixedSite = null;
+  try {
+    const parsed = new URL(publicUrl);
+    fixedSite = { origin: parsed.origin, rpId: parsed.hostname };
+  } catch {
+    /* not configured */
+  }
+  const siteOf = (req) => {
+    if (fixedSite) return fixedSite;
+    const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost');
+    const proto = req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    return { origin: `${proto}://${host}`, rpId: host.replace(/:\d+$/, '') };
+  };
+  // Passkey challenges awaiting an answer: key -> { challenge, expiresAt }.
+  const challenges = new Map();
+  const setChallenge = (key) => {
+    const challenge = newChallenge();
+    challenges.set(key, { challenge, expiresAt: now() + 5 * 60 * 1000 });
+    if (challenges.size > 2000) for (const [k, v] of challenges) if (v.expiresAt < now()) challenges.delete(k);
+    return challenge;
+  };
+  /** A challenge can be answered once. */
+  const takeChallenge = (key) => {
+    const entry = challenges.get(key);
+    challenges.delete(key);
+    return entry && entry.expiresAt > now() ? entry.challenge : null;
+  };
+  const hasMfa = (user) => user.passkeys.length > 0;
+  const clearMfa = (user) => {
+    user.passkeys = [];
+    user.recoveryCodes = [];
+    user.sessionKey = randomBytes(16).toString('hex');
+  };
+  const passkeyPrompt = (req, user) => requestOptions({ rpId: siteOf(req).rpId, challenge: setChallenge(`login:${user.id}`), allow: user.passkeys });
+
   const DAY_MS = 24 * 60 * 60 * 1000;
   const users = () => Object.values(data.users);
   const findUser = (name) => users().find((u) => u.username.toLowerCase() === String(name).toLowerCase()) || null;
@@ -127,7 +180,15 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
   /** Everything the signed-in user's own browser may see. Never another user's data. */
   const publicState = (u) => ({
-    me: { id: u.id, username: u.username, admin: u.admin, email: u.email, pendingEmail: u.pendingEmail?.expiresAt > now() ? u.pendingEmail.address : null },
+    me: {
+      id: u.id,
+      username: u.username,
+      admin: u.admin,
+      email: u.email,
+      pendingEmail: u.pendingEmail?.expiresAt > now() ? u.pendingEmail.address : null,
+      passkeys: u.passkeys.map((k) => ({ id: k.id, name: k.name, createdAt: k.createdAt })),
+      recoveryCodesLeft: u.recoveryCodes.length,
+    },
     mail: mailer.enabled,
     shows: Object.fromEntries(tracker.showsOf(u).map((s) => [s.key, s])),
     alerts: u.alerts,
@@ -155,7 +216,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     encrypted: store.encrypted,
     mail: mailer.enabled,
     users: users()
-      .map((x) => ({ id: x.id, username: x.username, admin: x.admin, createdAt: x.createdAt }))
+      .map((x) => ({ id: x.id, username: x.username, admin: x.admin, createdAt: x.createdAt, mfa: hasMfa(x) }))
       .sort((a, b) => a.createdAt - b.createdAt),
     pendingInvites: Object.values(data.invites).filter((i) => i.expiresAt > now()).length,
   });
@@ -206,10 +267,49 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         noteFailure(req);
         throw new HttpError(401, 'Wrong username or password.');
       }
-      return reply(200, { ok: true }, signIn(user));
+      if (!hasMfa(user)) return reply(200, { ok: true }, signIn(user));
+      // Password accepted, but this account also needs its passkey (or a recovery code).
+      return reply(200, { mfa: true, options: passkeyPrompt(req, user) }, { 'Set-Cookie': pendingCookie(data.secret, user, secure, now()) });
     }
 
-    if (route === 'POST /api/logout') return reply(200, { ok: true }, { 'Set-Cookie': clearCookie() });
+    if (route === 'POST /api/login/passkey' || route === 'POST /api/login/recovery') {
+      guardAttempts(req);
+      const user = pendingUser(req.headers.cookie, data, now());
+      if (!user) throw new HttpError(401, 'Sign in with your password first.');
+      const body = await readJson(req);
+      const done = () => {
+        store.save();
+        res.setHeader('Set-Cookie', [sessionCookie(data.secret, user, secure, now()), clearPendingCookie()]);
+        return reply(200, { ok: true, recoveryCodesLeft: user.recoveryCodes.length });
+      };
+      if (route.endsWith('/recovery')) {
+        const hash = recoveryHash(body.code);
+        const at = user.recoveryCodes.findIndex((h) => safeEqual(h, hash));
+        if (at < 0) {
+          noteFailure(req);
+          throw new HttpError(401, 'That recovery code is not valid.');
+        }
+        user.recoveryCodes.splice(at, 1); // each code works once
+        return done();
+      }
+      const credential = user.passkeys.find((k) => k.id === body.response?.id);
+      try {
+        if (!credential) throw new Error('That passkey is not registered for this account.');
+        const { origin, rpId } = siteOf(req);
+        credential.signCount = verifyAssertion({ response: body.response, challenge: takeChallenge(`login:${user.id}`), origin, rpId, credential }).signCount;
+      } catch (e) {
+        noteFailure(req);
+        // A fresh challenge lets the browser try again without re-entering the password.
+        res.writeHead(401, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...securityHeaders(req) });
+        return res.end(JSON.stringify({ error: e.message, options: passkeyPrompt(req, user) }));
+      }
+      return done();
+    }
+
+    if (route === 'POST /api/logout') {
+      res.setHeader('Set-Cookie', [clearCookie(), clearPendingCookie()]);
+      return reply(200, { ok: true });
+    }
 
     // Invite and reset links: looking one up or using one counts against the
     // guess limit when it is wrong.
@@ -254,6 +354,9 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       user.sessionKey = randomBytes(16).toString('hex'); // signs every device out
       delete data.resets[tokenHash(token)];
       store.save();
+      // A reset link proves control of the mailbox (or the admin's say-so), not of
+      // the passkey: protected accounts still go through the second step.
+      if (hasMfa(user)) return reply(200, { ok: true, mfa: true, options: passkeyPrompt(req, user) }, { 'Set-Cookie': pendingCookie(data.secret, user, secure, now()) });
       return reply(200, { ok: true }, signIn(user));
     }
 
@@ -333,6 +436,15 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           data.resets[tokenHash(token)] = { userId: id, expiresAt: now() + DAY_MS };
           store.save();
           return reply(200, { token });
+        }
+
+        case 'POST /api/admin/mfa/clear': {
+          const { id } = await readJson(req);
+          if (typeof id !== 'string' || !Object.hasOwn(data.users, id)) throw new HttpError(400, 'Unknown user.');
+          if (id === u.id) throw new HttpError(400, 'Remove your own passkeys under Security instead.');
+          clearMfa(data.users[id]);
+          store.save();
+          return reply(200, adminView());
         }
 
         case 'DELETE /api/admin/users': {
@@ -491,6 +603,52 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         return reply(200, publicState(u));
       }
 
+      case 'POST /api/passkeys/options': {
+        const { rpId } = siteOf(req);
+        return reply(200, creationOptions({ rpId, rpName: 'Show Tracker', user: u, challenge: setChallenge(`register:${u.id}`), exclude: u.passkeys.map((k) => k.id) }));
+      }
+
+      case 'POST /api/passkeys': {
+        const { name, response } = await readJson(req);
+        if (u.passkeys.length >= 10) throw new HttpError(400, 'Remove a passkey before adding another (10 at most).');
+        let credential;
+        try {
+          const { origin, rpId } = siteOf(req);
+          credential = verifyRegistration({ response, challenge: takeChallenge(`register:${u.id}`), origin, rpId });
+        } catch (e) {
+          throw new HttpError(400, e.message);
+        }
+        if (users().some((x) => x.passkeys.some((k) => k.id === credential.id))) throw new HttpError(409, 'That passkey is already registered.');
+        const label = typeof name === 'string' && name.trim() ? name.trim().slice(0, 40) : 'Passkey';
+        const first = !hasMfa(u);
+        u.passkeys.push({ ...credential, name: label, createdAt: now() });
+        // The first passkey switches protection on; recovery codes come with it.
+        let recoveryCodes = null;
+        if (first) {
+          recoveryCodes = newRecoveryCodes();
+          u.recoveryCodes = recoveryCodes.map(recoveryHash);
+        }
+        store.save();
+        return reply(200, { ...publicState(u), recoveryCodes });
+      }
+
+      case 'DELETE /api/passkeys': {
+        const id = url.searchParams.get('id') || '';
+        if (!u.passkeys.some((k) => k.id === id)) throw new HttpError(400, 'Unknown passkey.');
+        u.passkeys = u.passkeys.filter((k) => k.id !== id);
+        if (!hasMfa(u)) u.recoveryCodes = []; // protection is off again
+        store.save();
+        return reply(200, publicState(u));
+      }
+
+      case 'POST /api/recovery-codes': {
+        if (!hasMfa(u)) throw new HttpError(400, 'Add a passkey first.');
+        const recoveryCodes = newRecoveryCodes();
+        u.recoveryCodes = recoveryCodes.map(recoveryHash);
+        store.save();
+        return reply(200, { ...publicState(u), recoveryCodes });
+      }
+
       case 'PUT /api/account/email': {
         const { email } = await readJson(req);
         if (email === '' || email === null) {
@@ -611,7 +769,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
   const dataKey = process.env.DATA_KEY || '';
   const mailer = createMailer({ apiKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM, publicUrl: process.env.PUBLIC_URL });
-  const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer });
+  const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer, publicUrl: process.env.PUBLIC_URL });
   console.log(mailer.enabled ? 'E-mail recovery is on.' : 'E-mail recovery is off (needs RESEND_API_KEY, MAIL_FROM and PUBLIC_URL).');
   console.log(store.encrypted ? 'Data is encrypted at rest.' : 'WARNING: DATA_KEY is not set, so data is stored unencrypted.');
   if (setupCode) console.log(`No account exists yet. Setup code for the first visit: ${setupCode}`);
@@ -621,8 +779,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (admin) {
       const token = newToken();
       store.data.resets[tokenHash(token)] = { userId: admin.id, expiresAt: Date.now() + 60 * 60 * 1000 };
+      // Recovery mode also removes the admin's passkeys, in case those are what was lost.
+      admin.passkeys = [];
+      admin.recoveryCodes = [];
       store.save();
-      console.log(`Admin password reset (valid 1 hour): open the site and add  /#reset=${token}  to its address. Then remove RECOVER_ADMIN.`);
+      console.log(`Admin recovery — passkeys removed, password reset link valid 1 hour: open the site and add  /#reset=${token}  to its address. Then remove RECOVER_ADMIN.`);
     }
   }
   process.on('unhandledRejection', (e) => console.error('Unhandled rejection:', e));
