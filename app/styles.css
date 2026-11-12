@@ -263,3 +263,12 @@ h2 .today { color: var(--accent); }
 .banner.good { border-color: var(--good); color: var(--good); }
 .auth .btn.quiet { align-self: flex-start; padding-left: 0; }
 .auth .btn.quiet:hover:not(:disabled) { color: var(--text); text-decoration: underline; }
+
+/* ---------- passkeys ---------- */
+.stack { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--line); }
+.stack .field { margin-top: 0; }
+.codes {
+  margin: 0; padding: 14px; border-radius: 8px; background: var(--panel-2);
+  font: 15px/1.7 ui-monospace, Consolas, monospace; columns: 2; user-select: all;
+}
+a.btn { text-decoration: none; display: inline-block; }

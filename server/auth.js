@@ -55,3 +55,43 @@ export function sessionUser(cookieHeader, data, now = Date.now()) {
   if (!user || Number(expires) <= now) return null;
   return safeEqual(mac, sign(data.secret, user, `${id}.${expires}`)) ? user : null;
 }
+
+// ---- second step of sign-in
+//
+// After a correct password, an account with passkeys gets this short-lived
+// cookie instead of a session. It only proves "the password was right" and is
+// accepted solely by the routes that complete the second step.
+
+const PENDING = 'st_pending';
+const PENDING_MS = 5 * 60 * 1000;
+
+export function pendingCookie(secret, user, secure, now = Date.now()) {
+  const value = `${user.id}.${now + PENDING_MS}`;
+  const mac = createHmac('sha256', `${secret}:pending:${user.sessionKey}`).update(value).digest('hex');
+  return `${PENDING}=${value}.${mac}; Path=/api/login; HttpOnly; SameSite=Strict; Max-Age=${PENDING_MS / 1000}${secure ? '; Secure' : ''}`;
+}
+
+export function clearPendingCookie() {
+  return `${PENDING}=; Path=/api/login; HttpOnly; SameSite=Strict; Max-Age=0`;
+}
+
+export function pendingUser(cookieHeader, data, now = Date.now()) {
+  const match = /(?:^|;\s*)st_pending=(u[0-9a-f]+)\.(\d+)\.([0-9a-f]+)/.exec(cookieHeader || '');
+  if (!match) return null;
+  const [, id, expires, mac] = match;
+  const user = Object.hasOwn(data.users, id) ? data.users[id] : null;
+  if (!user || Number(expires) <= now) return null;
+  const want = createHmac('sha256', `${data.secret}:pending:${user.sessionKey}`).update(`${id}.${expires}`).digest('hex');
+  return safeEqual(mac, want) ? user : null;
+}
+
+/** Ten one-time recovery codes, as shown to the user: xxxxx-xxxxx. */
+export function newRecoveryCodes() {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789'; // no look-alikes
+  return Array.from({ length: 10 }, () => {
+    const chars = Array.from(randomBytes(10), (b) => alphabet[b % alphabet.length]).join('');
+    return `${chars.slice(0, 5)}-${chars.slice(5)}`;
+  });
+}
+/** Codes are compared without regard to case, spaces or the dash. */
+export const recoveryHash = (code) => tokenHash(String(code ?? '').toLowerCase().replace(/[^a-z0-9]/g, ''));

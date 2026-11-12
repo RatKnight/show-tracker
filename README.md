@@ -58,8 +58,9 @@ Environment variables:
 | Variable | Purpose |
 |---|---|
 | `DATA_KEY` | Encrypts the data file at rest (AES-256-GCM). At least 32 characters. **Keep a copy somewhere safe: without it the data cannot be read.** If unset, data is stored unencrypted and the admin sees a warning. |
-| `RESEND_API_KEY`, `MAIL_FROM`, `PUBLIC_URL` | Optional e-mail password recovery through [Resend](https://resend.com). Needs all three: an API key with sending access, a sender on a verified domain (e.g. `Show Tracker <noreply@example.com>`), and the site's public `https://` address, which is what links in e-mails point to. |
-| `RECOVER_ADMIN` | Set to `yes` for one start to print an admin password-reset link in the log. |
+| `PUBLIC_URL` | The site's public `https://` address. Passkeys are bound to it, and links in e-mails point to it. |
+| `RESEND_API_KEY`, `MAIL_FROM` | Optional e-mail password recovery through [Resend](https://resend.com). Needs `PUBLIC_URL` too. An API key with sending access, and a sender on a verified domain (e.g. `Show Tracker <noreply@example.com>`). |
+| `RECOVER_ADMIN` | Set to `yes` for one start to remove the admin's passkeys and print an admin password-reset link in the log. |
 | `PORT`, `DATA_DIR` | Default `3000` and `/data`. |
 
 Put it behind HTTPS (Coolify's proxy does this). On the first visit you create the
@@ -75,6 +76,12 @@ yet. Setup code for the first visit: …`), so nobody else can claim a fresh ins
 - This protects stored data. It does not hide data from someone who controls the
   running server, because the server must read lists to check schedules and send
   alerts.
+- **Passkeys** add a second sign-in step. After signing in without one, people are
+  prompted to add a passkey; from then on a sign-in needs the password and the
+  passkey. Ten one-time recovery codes cover a lost or missing device. A password
+  reset (by e-mail or admin link) does not skip the passkey; an admin can remove
+  someone's passkeys if they lose both their device and their codes. Passkeys are
+  tied to the site's address, so set `PUBLIC_URL`.
 - Forgotten passwords are reset with a one-time link: created by an admin
   (*Settings → People*), or, when e-mail is configured, sent to the address a
   person has added and confirmed. Addresses are optional, used for nothing else,

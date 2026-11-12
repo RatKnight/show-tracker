@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], me: { username: '', admin: false, email: '', pendingEmail: null }, mail: false };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], muted: [], me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0 }, mail: false };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -22,6 +22,9 @@ const ui = {
   shared: null, // someone else's shared list
   forgot: false, // showing the forgot-password form
   info: null, // one-off good news shown above the page
+  mfa: null, // { options } while the second sign-in step is pending
+  offerPasskey: false, // showing the "add a passkey" prompt after sign-in
+  codes: null, // recovery codes to show once
 };
 
 const shows = () => Object.values(state.shows);
@@ -43,7 +46,11 @@ async function call(method, path, body) {
     ui.session = { setup: true, authed: false };
     render();
   }
-  if (!res.ok) throw new Error(json?.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(json?.error || `Request failed (${res.status})`);
+    err.body = json;
+    throw err;
+  }
   if (json && json.shows) {
     // The list changed, so suggestions built from it are stale.
     if (Object.keys(json.shows).length !== Object.keys(state.shows).length) {
@@ -850,7 +857,7 @@ function viewSettings() {
                 h(
                   'div',
                   { class: 'row' },
-                  h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, `Joined ${fmtShortDay.format(p.createdAt)}`)),
+                  h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, `Joined ${fmtShortDay.format(p.createdAt)} · ${p.mfa ? 'passkey on' : 'no passkey'}`)),
                   h(
                     'div',
                     { class: 'side' },
@@ -865,6 +872,26 @@ function viewSettings() {
                       'Reset link',
                     ),
                     p.id !== state.me.id &&
+                      p.mfa &&
+                      h(
+                        'button',
+                        {
+                          class: 'btn',
+                          type: 'button',
+                          title: 'For someone who lost their passkey and their recovery codes',
+                          onclick: async () => {
+                            if (!confirm(`Remove ${p.username}’s passkeys and recovery codes? They will sign in with their password alone until they add a new passkey.`)) return;
+                            try {
+                              ui.admin = await call('POST', '/api/admin/mfa/clear', { id: p.id });
+                              render();
+                            } catch (e) {
+                              fail(e);
+                            }
+                          },
+                        },
+                        'Remove passkeys',
+                      ),
+                                        p.id !== state.me.id &&
                       h(
                         'button',
                         {
@@ -912,6 +939,96 @@ function viewSettings() {
       'section',
       {},
       h('h2', {}, 'Security'),
+      (() => {
+        const out = h('p', { class: 'muted small', role: 'status' });
+        const keys = state.me.passkeys;
+        const name = h('input', { type: 'text', id: 'passkey-name', value: deviceName(), maxlength: 40 });
+        return h(
+          'div',
+          { class: 'card' },
+          h('p', { class: keys.length ? 'muted' : 'error' }, keys.length ? 'Signing in needs your password and one of these passkeys.' : 'No passkey yet: your account is protected by its password alone.'),
+          keys.length > 0 &&
+            h(
+              'div',
+              { class: 'list' },
+              keys.map((k) =>
+                h(
+                  'div',
+                  { class: 'row' },
+                  h('div', { class: 'body' }, h('div', { class: 'title' }, k.name), h('div', { class: 'sub' }, `Added ${fmtShortDay.format(k.createdAt)}`)),
+                  h(
+                    'div',
+                    { class: 'side' },
+                    h(
+                      'button',
+                      {
+                        class: 'btn quiet',
+                        type: 'button',
+                        onclick: () => {
+                          const last = keys.length === 1;
+                          if (confirm(last ? `Remove “${k.name}”? It is your only passkey, so your account will be protected by its password alone.` : `Remove the passkey “${k.name}”?`)) act('DELETE', `/api/passkeys?id=${encodeURIComponent(k.id)}`);
+                        },
+                      },
+                      'Remove',
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          canPasskey()
+            ? [
+                h('label', { class: 'field', for: 'passkey-name' }, 'Add a passkey on this device, named', name),
+                h(
+                  'div',
+                  { class: 'actions' },
+                  h(
+                    'button',
+                    {
+                      class: 'btn primary',
+                      type: 'button',
+                      onclick: async () => {
+                        out.textContent = '';
+                        try {
+                          const r = await addPasskey(name.value);
+                          ui.codes = r.recoveryCodes;
+                          render();
+                        } catch (e) {
+                          out.textContent = e.body ? e.message : passkeyError(e);
+                        }
+                      },
+                    },
+                    'Add a passkey',
+                  ),
+                ),
+              ]
+            : h('p', { class: 'muted small' }, 'This browser does not support passkeys.'),
+          keys.length > 0 && [
+            h('p', { class: 'muted' }, `Recovery codes left: ${state.me.recoveryCodesLeft} of 10. Each one signs you in once without a passkey.`),
+            h(
+              'div',
+              { class: 'actions' },
+              h(
+                'button',
+                {
+                  class: 'btn',
+                  type: 'button',
+                  onclick: async () => {
+                    if (!confirm('Make 10 new recovery codes? The old ones stop working.')) return;
+                    try {
+                      ui.codes = (await call('POST', '/api/recovery-codes')).recoveryCodes;
+                      render();
+                    } catch (e) {
+                      out.textContent = e.message;
+                    }
+                  },
+                },
+                'Make new recovery codes',
+              ),
+            ),
+          ],
+          out,
+        );
+      })(),
       (() => {
         const cur = h('input', { type: 'password', id: 'pw-current', autocomplete: 'current-password', required: true });
         const next = h('input', { type: 'password', id: 'pw-next', autocomplete: 'new-password', required: true, minlength: 8 });
@@ -976,6 +1093,205 @@ function viewSettings() {
   ];
 }
 
+// ---------------------------------------------------------------- passkeys
+
+const canPasskey = () => Boolean(window.PublicKeyCredential && navigator.credentials);
+const toBuf = (b64u) => Uint8Array.from(atob(b64u.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+const toB64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/** A readable default name for the passkey being added on this device. */
+function deviceName() {
+  const ua = navigator.userAgent;
+  const os = /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'This device';
+  const browser = /Firefox\//.test(ua) ? 'Firefox' : /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
+  return browser ? `${browser} on ${os}` : os;
+}
+
+/** Turn a browser passkey error into something a person can act on. */
+function passkeyError(e) {
+  if (e?.name === 'NotAllowedError') return 'The passkey prompt was cancelled or timed out.';
+  if (e?.name === 'InvalidStateError') return 'This device already has a passkey for this account.';
+  if (e?.name === 'SecurityError') return 'Passkeys only work on the site’s real address over HTTPS.';
+  return e?.message || 'The passkey could not be used.';
+}
+
+/** Create a passkey on this device and register it. Resolves to the server's reply. */
+async function addPasskey(name) {
+  const o = await call('POST', '/api/passkeys/options');
+  const cred = await navigator.credentials.create({
+    publicKey: { ...o, challenge: toBuf(o.challenge), user: { ...o.user, id: toBuf(o.user.id) }, excludeCredentials: o.excludeCredentials.map((c) => ({ ...c, id: toBuf(c.id) })) },
+  });
+  const r = cred.response;
+  if (!r.getPublicKey || !r.getPublicKey()) throw new Error('This browser cannot hand over the passkey’s public key. Try a current browser.');
+  return call('POST', '/api/passkeys', {
+    name,
+    response: {
+      id: cred.id,
+      clientDataJSON: toB64u(r.clientDataJSON),
+      authenticatorData: toB64u(r.getAuthenticatorData()),
+      publicKey: toB64u(r.getPublicKey()),
+      alg: r.getPublicKeyAlgorithm(),
+      transports: r.getTransports?.() || [],
+    },
+  });
+}
+
+/** Ask this device for a passkey signature matching the server's challenge. */
+async function signWithPasskey(o) {
+  const cred = await navigator.credentials.get({
+    publicKey: { ...o, challenge: toBuf(o.challenge), allowCredentials: o.allowCredentials.map((c) => ({ ...c, id: toBuf(c.id) })) },
+  });
+  const r = cred.response;
+  return { id: cred.id, clientDataJSON: toB64u(r.clientDataJSON), authenticatorData: toB64u(r.authenticatorData), signature: toB64u(r.signature) };
+}
+
+/** After any successful sign-in: load the account and decide what to show first. */
+async function enterApp() {
+  ui.mfa = null;
+  ui.session = { ...ui.session, setup: true, authed: true };
+  await call('GET', '/api/state');
+  await adoptTimeZone();
+  let skipped = false;
+  try {
+    skipped = sessionStorage.getItem('passkey-later') === '1';
+  } catch {
+    /* storage unavailable: just ask */
+  }
+  ui.offerPasskey = canPasskey() && state.me.passkeys.length === 0 && !skipped;
+  render();
+}
+
+/** Second sign-in step: passkey, or a recovery code when the passkey is not to hand. */
+function viewMfa() {
+  const msg = h('p', { class: 'error small', role: 'alert' });
+  const code = h('input', { type: 'text', id: 'recovery-code', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', placeholder: 'xxxxx-xxxxx' });
+  const usePasskey = async () => {
+    msg.textContent = '';
+    try {
+      const response = await signWithPasskey(ui.mfa.options);
+      await call('POST', '/api/login/passkey', { response });
+      await enterApp();
+    } catch (e) {
+      if (e.body?.options) ui.mfa.options = e.body.options;
+      msg.textContent = e.body ? e.message : passkeyError(e);
+    }
+  };
+  const view = h(
+    'div',
+    { class: 'card auth' },
+    h('h3', {}, 'Confirm it’s you'),
+    h('p', { class: 'muted' }, 'Your password was right. This account is also protected by a passkey.'),
+    canPasskey() ? h('button', { class: 'btn primary', type: 'button', id: 'use-passkey', onclick: usePasskey }, 'Use my passkey') : h('p', { class: 'error small' }, 'This browser does not support passkeys. Use a recovery code.'),
+    h(
+      'form',
+      {
+        class: 'stack',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          msg.textContent = '';
+          try {
+            const r = await call('POST', '/api/login/recovery', { code: code.value });
+            await enterApp();
+            ui.info = `Signed in with a recovery code. ${r.recoveryCodesLeft} left — add a passkey on this device under Settings → Security.`;
+            render();
+          } catch (err) {
+            msg.textContent = err.message;
+          }
+        },
+      },
+      h('label', { class: 'field', for: 'recovery-code' }, 'No passkey on this device? Enter a recovery code', code),
+      h('button', { class: 'btn', type: 'submit' }, 'Use recovery code'),
+    ),
+    h(
+      'button',
+      {
+        class: 'btn quiet',
+        type: 'button',
+        onclick: () => {
+          ui.mfa = null;
+          render();
+        },
+      },
+      'Back to sign in',
+    ),
+    msg,
+  );
+  return view;
+}
+
+/** Shown once after sign-in while the account has no passkey. */
+function viewOfferPasskey() {
+  const msg = h('p', { class: 'error small', role: 'alert' });
+  const later = () => {
+    try {
+      sessionStorage.setItem('passkey-later', '1');
+    } catch {
+      /* fine */
+    }
+    ui.offerPasskey = false;
+    render();
+  };
+  return h(
+    'div',
+    { class: 'card auth' },
+    h('h3', {}, 'Protect your account with a passkey'),
+    h('p', { class: 'muted' }, 'A passkey lives on this device and is unlocked with your fingerprint, face or PIN. Once you add one, signing in needs your password and the passkey, so a stolen password is not enough.'),
+    h(
+      'button',
+      {
+        class: 'btn primary',
+        type: 'button',
+        id: 'add-passkey',
+        onclick: async () => {
+          msg.textContent = '';
+          try {
+            const r = await addPasskey(deviceName());
+            ui.offerPasskey = false;
+            ui.codes = r.recoveryCodes;
+            render();
+          } catch (e) {
+            msg.textContent = e.body ? e.message : passkeyError(e);
+          }
+        },
+      },
+      'Set up a passkey',
+    ),
+    h('button', { class: 'btn quiet', type: 'button', onclick: later }, 'Not now'),
+    msg,
+  );
+}
+
+/** Recovery codes are shown exactly once, right after they are made. */
+function viewCodes() {
+  const text = ui.codes.join('\n');
+  return h(
+    'div',
+    { class: 'card auth' },
+    h('h3', {}, 'Save your recovery codes'),
+    h('p', { class: 'muted' }, 'Each code signs you in once if you do not have your passkey to hand, for example on a new device. Keep them in your password manager. They will not be shown again.'),
+    h('pre', { class: 'codes', id: 'recovery-codes' }, text),
+    h(
+      'div',
+      { class: 'actions' },
+      h('button', { class: 'btn', type: 'button', onclick: (e) => navigator.clipboard?.writeText(text).then(() => (e.target.textContent = 'Copied')) }, 'Copy'),
+      h('a', { class: 'btn', href: `data:text/plain;charset=utf-8,${encodeURIComponent(`Show Tracker recovery codes for ${state.me.username}\n\n${text}\n`)}`, download: 'show-tracker-recovery-codes.txt' }, 'Download'),
+    ),
+    h(
+      'button',
+      {
+        class: 'btn primary',
+        type: 'button',
+        id: 'codes-saved',
+        onclick: () => {
+          ui.codes = null;
+          render();
+        },
+      },
+      'I have saved them',
+    ),
+  );
+}
+
 /** Forget a one-time link once it has been used or turned out to be dead. */
 function dropLink() {
   ui.link = null;
@@ -1017,6 +1333,7 @@ function viewForgot() {
 }
 
 function viewAuth() {
+  if (ui.mfa) return viewMfa();
   if (ui.forgot && !ui.link) return viewForgot();
   const link = ui.link;
   // Which of the four forms this is.
@@ -1046,12 +1363,14 @@ function viewAuth() {
         e.preventDefault();
         msg.textContent = '';
         try {
-          await send();
+          const r = await send();
           if (link) dropLink();
-          ui.session = { setup: true, authed: true };
-          await call('GET', '/api/state');
-          await adoptTimeZone();
-          render();
+          if (r?.mfa) {
+            // Password accepted; the passkey step comes next.
+            ui.mfa = { options: r.options };
+            return render();
+          }
+          await enterApp();
         } catch (err) {
           msg.textContent = err.message;
         }
@@ -1127,6 +1446,12 @@ function render() {
     document.body.classList.add('signed-out');
     $('banner').hidden = true;
     $('view').replaceChildren(...viewShared());
+    return;
+  }
+  if (authed && !ui.link && (ui.codes || ui.offerPasskey)) {
+    document.body.classList.add('signed-out');
+    $('banner').hidden = true;
+    $('view').replaceChildren(ui.codes ? viewCodes() : viewOfferPasskey());
     return;
   }
   if (!authed || ui.link) {
@@ -1306,8 +1631,7 @@ async function boot() {
       const info = await call('GET', `/api/link?kind=${hash[1]}&token=${hash[2]}`);
       ui.link = { ...info, token: hash[2] };
     } else if (ui.session.authed) {
-      await call('GET', '/api/state');
-      await adoptTimeZone();
+      return await enterApp();
     }
   } catch (e) {
     ui.session ||= { setup: true, authed: false };
