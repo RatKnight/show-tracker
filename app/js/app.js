@@ -2278,7 +2278,86 @@ function render() {
   // a tour that is already running finds its target again.
   if (tour.at >= 0) placeTour();
   else if (!state.settings.tourDone && !tour.offered) startTour();
+  syncInstall();
 }
+
+// ---------------------------------------------------------------- install offer
+//
+// Chrome, Edge and Samsung Internet hand the page an install prompt it can show
+// from its own button. Safari and Firefox have no such thing, so there the offer
+// says where the browser keeps "Add to Home Screen".
+
+const install = { prompt: null, asked: false };
+const installed = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+/** Where to find it by hand, for browsers that cannot be asked; '' where that is not known. */
+function installHint() {
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad/.test(ua)) return 'Tap the Share button, then “Add to Home Screen”.';
+  if (/Android/.test(ua) && /Firefox\//.test(ua)) return 'Open the browser menu (⋮), then “Add to Home screen”.';
+  return '';
+}
+const installDismissed = () => {
+  try {
+    // "Not now" holds for a month.
+    return Date.now() - Number(localStorage.getItem('install-later') || 0) < 30 * 24 * 60 * 60 * 1000;
+  } catch {
+    return install.asked;
+  }
+};
+function dismissInstall() {
+  install.asked = true;
+  try {
+    localStorage.setItem('install-later', String(Date.now()));
+  } catch {
+    /* storage unavailable: it stays away for this visit */
+  }
+  syncInstall();
+}
+
+/** Show or hide the offer and the menu entry to match what this browser can do right now. */
+function syncInstall() {
+  const able = !installed() && Boolean(install.prompt || installHint());
+  $('menu-install').hidden = !able;
+  // Not on top of the sign-in screens or the tour, and not again after "Not now".
+  const show = able && Boolean(ui.session?.authed) && !document.body.classList.contains('signed-out') && tour.at < 0 && state.settings.tourDone && !install.asked && !installDismissed();
+  $('install').hidden = !show;
+  $('install-how').textContent = install.prompt ? 'It opens like an app and can send you notifications.' : installHint();
+  $('install-yes').hidden = !install.prompt;
+  $('install-no').textContent = install.prompt ? 'Not now' : 'Got it';
+}
+
+async function runInstall() {
+  if (!install.prompt) {
+    // No prompt to show: bring the instructions back up.
+    install.asked = false;
+    try {
+      localStorage.removeItem('install-later');
+    } catch {
+      /* nothing stored */
+    }
+    return syncInstall();
+  }
+  const offer = install.prompt;
+  install.prompt = null; // a prompt can be shown once
+  offer.prompt();
+  const { outcome } = await offer.userChoice.catch(() => ({ outcome: 'dismissed' }));
+  if (outcome === 'accepted') install.asked = true;
+  else dismissInstall();
+  syncInstall();
+}
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault(); // keep the browser's own mini-bar away; ours asks instead
+  install.prompt = e;
+  syncInstall();
+});
+window.addEventListener('appinstalled', () => {
+  install.prompt = null;
+  install.asked = true;
+  syncInstall();
+});
+$('install-yes').addEventListener('click', runInstall);
+$('install-no').addEventListener('click', dismissInstall);
 
 // ---------------------------------------------------------------- guided tour
 
@@ -2357,7 +2436,8 @@ function endTour() {
   if (tour.at < 0) return;
   tour.at = -1;
   $('tour').hidden = true;
-  if (!state.settings.tourDone) call('PUT', '/api/settings', { tourDone: true }).catch(() => {});
+  // (Rendering again once it is saved lets the install offer follow the tour.)
+  if (!state.settings.tourDone) call('PUT', '/api/settings', { tourDone: true }).then(render, () => {});
   setTab(tour.returnTab === 'admin' ? 'upcoming' : tour.returnTab || 'upcoming');
   window.scrollTo(0, 0);
   tour.focusBack?.focus?.();
@@ -2534,6 +2614,7 @@ profileMenu.addEventListener('click', async (e) => {
     return signOut();
   }
   if (go === 'tour') return startTour();
+  if (go === 'install') return runInstall();
   setTab(go);
   window.scrollTo(0, 0);
 });

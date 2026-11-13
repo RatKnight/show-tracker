@@ -281,8 +281,36 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       .map(([hash, i]) => ({ id: hash.slice(0, 16), note: i.note || '', createdAt: i.createdAt || null, expiresAt: i.expiresAt }))
       .sort((a, b) => a.expiresAt - b.expiresAt),
   });
-  const seasonCache = new Map();
-  const premiereCache = new Map();
+  /**
+   * A list from a source (a season's line-up, a country's premieres), stored in
+   * the data file so a restart does not fetch it again. Fetched anew once it is
+   * older than `maxAge`; if that fails, the stored copy is served instead.
+   */
+  async function storedList(name, maxAge, fetchIt) {
+    const hit = data.lists[name];
+    if (hit && now() - hit.at <= maxAge) return hit.value;
+    try {
+      data.lists[name] = { at: now(), value: await fetchIt() };
+      // Lists nobody has asked for in a week (last season, a country no longer used) are dropped.
+      for (const key of Object.keys(data.lists)) if (now() - data.lists[key].at > 7 * 24 * 60 * 60 * 1000) delete data.lists[key];
+      store.save();
+    } catch (e) {
+      if (!hit) throw e;
+    }
+    return data.lists[name].value;
+  }
+  // Search answers are kept for an hour, in memory only: what people look for is not written down.
+  const searches = new Map();
+  async function search(kind, q) {
+    const key = `${kind}:${q.toLowerCase()}`;
+    const hit = searches.get(key);
+    if (hit && now() - hit.at < 60 * 60 * 1000) return hit.found;
+    const found = await (kind === 'movie' ? sources.searchMovies(q) : kind === 'tv' ? sources.searchTv(q) : sources.searchAnime(q));
+    searches.delete(key);
+    searches.set(key, { at: now(), found });
+    if (searches.size > 300) searches.delete(searches.keys().next().value);
+    return found;
+  }
   /** Movie features need a TMDB key on the server. */
   const movies = () => Boolean(sources.hasMovies?.());
 
@@ -655,8 +683,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         if (q.length < 2) return reply(200, []);
         const kind = url.searchParams.get('source');
         if (kind === 'movie' && !movies()) throw new HttpError(400, 'Movies are not set up on this site.');
-        const found = await (kind === 'movie' ? sources.searchMovies(q) : kind === 'tv' ? sources.searchTv(q) : sources.searchAnime(q));
-        return reply(200, found);
+        return reply(200, await search(kind === 'movie' || kind === 'tv' ? kind : 'anime', q));
       }
 
       case 'POST /api/shows': {
@@ -798,12 +825,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
       case 'GET /api/premieres': {
         const region = u.settings.region || 'US';
-        let hit = premiereCache.get(region);
-        if (!hit || now() - hit.at > 12 * 60 * 60 * 1000) {
-          hit = { at: now(), list: await sources.fetchPremieres(region, now()) };
-          premiereCache.set(region, hit);
-        }
-        return reply(200, { region, list: hit.list });
+        return reply(200, { region, list: await storedList(`premieres:${region}`, 12 * 60 * 60 * 1000, () => sources.fetchPremieres(region, now())) });
       }
 
       case 'GET /api/cinema': {
@@ -815,12 +837,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       case 'GET /api/season': {
         const { season, year } = animeSeason(new Date(now()), url.searchParams.get('which') === 'next' ? 1 : 0);
         const id = `${season}-${year}`;
-        let hit = seasonCache.get(id);
-        if (!hit || now() - hit.at > 6 * 60 * 60 * 1000) {
-          hit = { at: now(), shows: await sources.fetchSeason(season, year, now()) };
-          seasonCache.set(id, hit);
-        }
-        return reply(200, { season, year, list: hit.shows });
+        return reply(200, { season, year, list: await storedList(`season:${id}`, 6 * 60 * 60 * 1000, () => sources.fetchSeason(season, year, now())) });
       }
 
       case 'PUT /api/account': {

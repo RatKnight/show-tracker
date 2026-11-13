@@ -36,6 +36,7 @@
           <button type="button" role="menuitem" data-go="profile">Profile</button>
           <button type="button" role="menuitem" data-go="settings">Settings</button>
           <button type="button" role="menuitem" data-go="tour">Take the tour</button>
+          <button type="button" role="menuitem" data-go="install" id="menu-install" hidden>Install the app</button>
           <button type="button" role="menuitem" data-go="logout">Log out</button>
         </div>
       </div>
@@ -47,6 +48,17 @@
   <main id="view"></main>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <div class="install" id="install" role="region" aria-label="Install the app" hidden>
+    <img src="icon-192.png" alt="" width="40" height="40">
+    <div class="install-text">
+      <strong>Add Show Tracker to your home screen?</strong>
+      <span class="muted small" id="install-how"></span>
+    </div>
+    <div class="install-actions">
+      <button type="button" class="btn primary" id="install-yes">Install</button>
+      <button type="button" class="btn" id="install-no">Not now</button>
+    </div>
+  </div>
   <div class="tour" id="tour" hidden>
     <div class="tour-spot" id="tour-spot"></div>
     <div class="tour-card" id="tour-card" role="dialog" aria-modal="true" aria-labelledby="tour-title" aria-describedby="tour-text">
