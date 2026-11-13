@@ -306,7 +306,19 @@ details[open] > summary { margin-bottom: 10px; }
   display: block; width: 100%; text-align: left; font: inherit; color: var(--text); cursor: pointer;
   background: none; border: 0; border-radius: 6px; padding: 8px 10px;
 }
+.menu button[hidden] { display: none; }
 .menu button:hover, .menu button:focus-visible { background: var(--panel-2); outline: none; }
+
+/* ---------- install offer ---------- */
+.install {
+  position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 25; margin: 0 auto; max-width: 520px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgb(0 0 0 / .4);
+}
+.install[hidden] { display: none; }
+.install img { border-radius: 9px; }
+.install-text { flex: 1 1 200px; display: flex; flex-direction: column; gap: 2px; }
+.install-actions { display: flex; gap: 8px; margin-left: auto; }
 
 /* ---------- guided tour ---------- */
 .tour { position: fixed; inset: 0; z-index: 40; }

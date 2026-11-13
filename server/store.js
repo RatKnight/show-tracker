@@ -158,6 +158,7 @@ export function openStore(dir, { dataKey = '' } = {}) {
     availability: {}, // show key -> { tmdbId, byRegion: { US: [service names] }, links, at }: where it streams
     dubs: {}, // anime show key -> [{ id, label, airsAt, dub: true, watchId }]: English dub episodes
     dubsAt: 0,
+    lists: {}, // name -> { at, value }: season line-ups and premiere lists as fetched, kept across restarts
     related: {}, // anime id -> { sequels, recs, at }: what follows it and what its viewers recommend, as fetched
     franchise: {}, // anime show key -> { root, offset, index, count, at }: its place among its seasons
     invites: {}, // sha256(token) -> { expiresAt }

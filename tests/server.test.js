@@ -1770,3 +1770,47 @@ test('suggestions: adding a show asks the source about that show only, and old a
   tracker.removeShow(user, 'anilist:2');
   assert.deepEqual(Object.keys(store.data.related), []);
 });
+
+test('http: season line-ups and premieres are stored across restarts; a repeated search is not sent again', async (t) => {
+  const first = await serve(t);
+  const ann = first.client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: first.setupCode });
+  const count = { season: 0, premieres: 0, search: 0 };
+  const counting = (sources) => {
+    for (const [name, fn] of [['season', 'fetchSeason'], ['premieres', 'fetchPremieres'], ['search', 'searchAnime']]) {
+      const real = sources[fn].bind(sources);
+      sources[fn] = async (...a) => (count[name]++, real(...a));
+    }
+  };
+  counting(first.sources);
+
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await ann.req('GET', '/api/season?which=next')).body.list.length, 1);
+    assert.equal((await ann.req('GET', '/api/premieres')).body.list.length, 1);
+    assert.equal((await ann.req('GET', '/api/search?source=anime&q=Frieren')).body[0].title, 'Frieren');
+    assert.equal((await ann.req('GET', '/api/search?source=anime&q=frieren')).body.length, 1);
+  }
+  assert.deepEqual(count, { season: 1, premieres: 1, search: 1 });
+
+  // A restart (every deploy is one) reads the lists back instead of fetching them.
+  const time = { t: Date.now() };
+  const again = await serve(t, { dataDir: first.dir, now: () => time.t });
+  counting(again.sources);
+  const back = again.client();
+  assert.equal((await back.req('POST', '/api/login', { username: 'ann', password: 'password-ann' })).status, 200);
+  assert.equal((await back.req('GET', '/api/season?which=next')).body.list.length, 1);
+  assert.equal((await back.req('GET', '/api/premieres')).body.list.length, 1);
+  assert.deepEqual([count.season, count.premieres], [1, 1]);
+  // What people searched for is not in the file.
+  assert.ok(!JSON.stringify(again.store.data).toLowerCase().includes('frieren'));
+
+  // Once a list is old it is fetched again; if the source is down, the stored one is served.
+  time.t += 13 * 60 * 60 * 1000;
+  assert.equal((await back.req('GET', '/api/premieres')).status, 200);
+  assert.equal(count.premieres, 2);
+  time.t += 13 * 60 * 60 * 1000;
+  again.sources.fetchPremieres = async () => Promise.reject(new Error('TVmaze down'));
+  const stale = await back.req('GET', '/api/premieres');
+  assert.equal(stale.status, 200);
+  assert.equal(stale.body.list.length, 1);
+});
