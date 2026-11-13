@@ -23,6 +23,7 @@ const settingsDefaults = () => ({
   autoTrackSeasons: true, // new seasons of tracked anime join the list by themselves
   cinemaAlerts: true, // tell me when an anime film gets a US cinema date
   tourDone: false, // the guided tour has been finished or skipped
+  seenChanges: '', // the newest "what's new" entry this person has been shown
 });
 
 /** A complete user record: defaults, overlaid with whatever is given. */
@@ -158,6 +159,7 @@ export function openStore(dir, { dataKey = '' } = {}) {
     availability: {}, // show key -> { tmdbId, byRegion: { US: [service names] }, links, at }: where it streams
     dubs: {}, // anime show key -> [{ id, label, airsAt, dub: true, watchId }]: English dub episodes
     dubsAt: 0,
+    tvIds: {}, // TMDB series id -> TVmaze id, once looked up
     lists: {}, // name -> { at, value }: season line-ups and premiere lists as fetched, kept across restarts
     related: {}, // anime id -> { sequels, recs, at }: what follows it and what its viewers recommend, as fetched
     franchise: {}, // anime show key -> { root, offset, index, count, at }: its place among its seasons

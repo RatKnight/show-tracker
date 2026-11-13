@@ -1,3 +1,4 @@
+import { CHANGES } from './changes.js';
 import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGrid, formatCountdown, isWatched, watchState } from './core.js';
 
 // ---------------------------------------------------------------- state
@@ -6,6 +7,8 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], progress: {}, muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [], pushDevices: [] }, pushKey: '', mail: false, movies: false, dubs: false };
 const ui = {
   tab: 'upcoming',
+  added: new Set(), // keys of Discover tiles tracked during this visit
+
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   selectedDay: dayKey(Date.now()),
   refreshing: false,
@@ -65,11 +68,10 @@ async function call(method, path, body) {
     throw err;
   }
   if (json && json.shows) {
-    // The list changed, so suggestions built from it are stale.
-    if (Object.keys(json.shows).length !== Object.keys(state.shows).length) {
-      ui.discover = null;
-      delete ui.loading.discover;
-    }
+    // The list changed, so suggestions built from it are stale. They are fetched again the
+    // next time Discover is opened, not now: reloading the page under someone who is
+    // working down it would move everything and lose their place.
+    if (Object.keys(json.shows).length !== Object.keys(state.shows).length) ui.discoverStale = true;
     state = json;
   }
   return json;
@@ -385,7 +387,8 @@ function load(name, fetcher) {
 }
 
 function showCard(show, { reason, dismissable } = {}) {
-  const tracked = Boolean(state.shows[show.key]);
+  // (A series from the TV & films lists is tracked under another key, so those are remembered here.)
+  const tracked = Boolean(state.shows[show.key]) || ui.added.has(show.key);
   const next = nextEpisode(show);
   const when = next ? `${next.label} · ${fmtShortDay.format(next.airsAt)}` : show.note || show.status;
   const meta = [show.format, show.year, show.score && `${show.score}%`].filter(Boolean).join(' · ');
@@ -395,6 +398,7 @@ function showCard(show, { reason, dismissable } = {}) {
     add.textContent = 'Adding…';
     try {
       await call('POST', '/api/shows', { source: show.source, id: show.id });
+      ui.added.add(show.key);
       ui.error = null;
       render();
     } catch (e) {
@@ -427,7 +431,10 @@ function showCard(show, { reason, dismissable } = {}) {
               type: 'button',
               onclick: async () => {
                 try {
-                  ui.discover = await call('POST', '/api/discover/dismiss', { key: show.key });
+                  const fresh = await call('POST', '/api/discover/dismiss', { key: show.key });
+                  if (show.source === 'anilist') ui.discover = fresh;
+                  // The other lists are not sent back: take it out of the one on screen.
+                  else if (ui.popular) for (const part of ['recs', 'tv', 'movies']) ui.popular[part] = ui.popular[part].filter((x) => x.key !== show.key);
                 } catch (e) {
                   ui.error = e.message;
                 }
@@ -453,6 +460,7 @@ function viewDiscover() {
     ['foryou', 'For you'],
     ['current', 'This season'],
     ['next', 'Next season'],
+    ...(state.movies ? [['popular', 'TV & films']] : []),
     ['premieres', 'New on streaming'],
     ...(state.movies ? [['cinema', 'In cinemas']] : []),
   ];
@@ -508,6 +516,8 @@ function viewDiscover() {
         } catch (err) {
           ui.error = err.message;
         }
+        // The whole section is done with: this one does reload the suggestions.
+        freshDiscover();
         render();
       };
       out.push(
@@ -561,6 +571,20 @@ function viewDiscover() {
       ),
     );
     out.push(h('p', { class: 'muted small' }, 'From TVmaze’s streaming schedule: first episodes of new series and new seasons. Tick “Only on my services” above to narrow it down. Change the country in Settings.'));
+    return out;
+  }
+
+  if (which === 'popular') {
+    load('popular', async () => (ui.popular = await call('GET', '/api/popular')));
+    const p = ui.popular;
+    if (!p) return [...out, empty(ui.loading.popular === 'busy' ? 'Finding series and films…' : 'Could not load', ui.loading.popular === 'busy' ? '' : ui.loading.popular || '')];
+    const whole = ui.mineOnly;
+    ui.mineOnly = false; // these lists do not say where a title streams, so the services filter would hide everything
+    if (p.recs.length) out.push(h('section', {}, h('h2', {}, 'Because of the series and films you track'), tiles(p.recs, (s) => ({ reason: `Because you track ${s.because.join(', ')}`, dismissable: true }))));
+    out.push(h('section', {}, h('h2', {}, 'Popular series this week'), tiles(p.tv, { dismissable: true })));
+    out.push(h('section', {}, h('h2', {}, 'Popular films this week'), tiles(p.movies, { dismissable: true })));
+    ui.mineOnly = whole;
+    out.push(h('p', { class: 'muted small' }, `From TMDB. Anime is left out here; it has its own tabs.${p.recs.length ? '' : ' Track a TV series or a film and suggestions based on it appear at the top.'}`));
     return out;
   }
 
@@ -2278,8 +2302,39 @@ function render() {
   // a tour that is already running finds its target again.
   if (tour.at >= 0) placeTour();
   else if (!state.settings.tourDone && !tour.offered) startTour();
+  // After an update, say what changed, once. Someone new has just had the tour, which covers it.
+  else if (state.settings.tourDone && !news.offered && (state.settings.seenChanges || '') < latestChange) {
+    news.offered = true;
+    showNews();
+  }
   syncInstall();
 }
+
+// ---------------------------------------------------------------- what's new
+
+const latestChange = CHANGES[0]?.id || '';
+
+/** Show the entries this person has not seen (or all of them, when asked for from the menu). */
+function showNews(all = false) {
+  const seen = state.settings.seenChanges || '';
+  const list = all ? CHANGES : CHANGES.filter((c) => c.id > seen).slice(0, 3);
+  if (!list.length) return;
+  $('news-body').replaceChildren(...list.flatMap((c) => [h('h4', {}, c.title), h('ul', {}, c.items.map((item) => h('li', {}, item)))]));
+  $('news').hidden = false;
+  $('news-ok').focus();
+}
+function closeNews() {
+  if ($('news').hidden) return;
+  $('news').hidden = true;
+  markNewsSeen();
+  syncInstall();
+}
+const markNewsSeen = () => {
+  if (latestChange && state.settings.seenChanges !== latestChange) call('PUT', '/api/settings', { seenChanges: latestChange }).then(render, () => {});
+};
+$('news-ok').addEventListener('click', closeNews);
+$('news').addEventListener('click', (e) => e.target === $('news') && closeNews());
+document.addEventListener('keydown', (e) => e.key === 'Escape' && closeNews());
 
 // ---------------------------------------------------------------- install offer
 //
@@ -2288,6 +2343,7 @@ function render() {
 // says where the browser keeps "Add to Home Screen".
 
 const install = { prompt: null, asked: false };
+const news = { offered: false };
 const installed = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 /** Where to find it by hand, for browsers that cannot be asked; '' where that is not known. */
 function installHint() {
@@ -2319,7 +2375,7 @@ function syncInstall() {
   const able = !installed() && Boolean(install.prompt || installHint());
   $('menu-install').hidden = !able;
   // Not on top of the sign-in screens or the tour, and not again after "Not now".
-  const show = able && Boolean(ui.session?.authed) && !document.body.classList.contains('signed-out') && tour.at < 0 && state.settings.tourDone && !install.asked && !installDismissed();
+  const show = able && $('news').hidden && Boolean(ui.session?.authed) && !document.body.classList.contains('signed-out') && tour.at < 0 && state.settings.tourDone && !install.asked && !installDismissed();
   $('install').hidden = !show;
   $('install-how').textContent = install.prompt ? 'It opens like an app and can send you notifications.' : installHint();
   $('install-yes').hidden = !install.prompt;
@@ -2368,7 +2424,7 @@ const TOUR = [
   { tab: 'upcoming', title: 'Upcoming', text: 'Your home page: the next episodes of your shows in date order, with a countdown and where to watch them. Episodes that aired recently and are waiting for you sit at the top.' },
   { tab: 'next', title: 'Watch next', text: 'Where you are in each show. Tick off episodes as you watch them, or mark a whole show as caught up.' },
   { tab: 'calendar', title: 'Calendar', text: 'The same releases as a month view. Pick a day to see what airs on it.' },
-  { tab: 'discover', title: 'Discover', text: 'Things to add: new seasons of shows you follow, suggestions based on your list, what is airing this season and next, new arrivals on streaming, and films coming to cinemas.' },
+  { tab: 'discover', title: 'Discover', text: 'Things to add: new seasons of shows you follow, suggestions based on your list, what is airing this season and next, popular TV and films, new arrivals on streaming, and films coming to cinemas.' },
   { tab: 'shows', title: 'My shows', text: 'Everything you follow, with seasons of one series kept together. Mute a show to keep it listed without notifications, or remove it.' },
   { tab: 'alerts', title: 'Alerts', text: 'A note appears here whenever a new episode airs or a new season is announced. The number on the tab counts the ones you have not read.' },
   { tab: 'settings', title: 'Settings', text: 'Tell the app which streaming services you have and which country you are in, choose subtitled or dubbed releases, and send alerts to your phone or Discord. Changes save by themselves.' },
@@ -2437,7 +2493,9 @@ function endTour() {
   tour.at = -1;
   $('tour').hidden = true;
   // (Rendering again once it is saved lets the install offer follow the tour.)
-  if (!state.settings.tourDone) call('PUT', '/api/settings', { tourDone: true }).then(render, () => {});
+  // Finishing the tour also counts as having seen what is new: the tour just showed it.
+  news.offered = true;
+  if (!state.settings.tourDone || state.settings.seenChanges !== latestChange) call('PUT', '/api/settings', { tourDone: true, seenChanges: latestChange }).then(render, () => {});
   setTab(tour.returnTab === 'admin' ? 'upcoming' : tour.returnTab || 'upcoming');
   window.scrollTo(0, 0);
   tour.focusBack?.focus?.();
@@ -2462,7 +2520,15 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+/** Fetch suggestions again, keeping the current ones on screen until the new ones arrive. */
+function freshDiscover() {
+  ui.discoverStale = false;
+  delete ui.loading.discover;
+  delete ui.loading.popular;
+}
+
 function setTab(id) {
+  if (id === 'discover' && ui.tab !== 'discover' && ui.discoverStale) freshDiscover();
   // Leaving the alerts tab marks what you saw there as read.
   if (ui.tab === 'alerts' && id !== 'alerts' && state.alerts.some((a) => !a.read)) {
     for (const a of state.alerts) a.read = true;
@@ -2549,7 +2615,9 @@ function resultRow(show, nested = false) {
       btn.title = e.message;
     }
   });
-  const sub = [show.year, show.status, show.altTitle].filter(Boolean).join(' · ');
+  // With every category searched at once, say which kind each result is.
+  const kind = { anilist: 'Anime', tvmaze: 'TV', tmdb: 'Film' }[show.source];
+  const sub = [searchSource.value === 'all' && kind, show.year, show.status, show.altTitle].filter(Boolean).join(' · ');
   return h('div', { class: `row${nested ? ' nested' : ''}` }, thumb(show), h('div', { class: 'body' }, h('div', { class: 'title' }, show.title), h('div', { class: 'sub' }, sub), badges(show)), btn);
 }
 
@@ -2562,7 +2630,7 @@ async function runSearch() {
   try {
     const found = await call('GET', `/api/search?source=${searchSource.value}&q=${encodeURIComponent(q)}`);
     if (seq !== searchSeq) return;
-    resultsEl.replaceChildren(...(found.length ? foldSeasons(found).flatMap(({ show, seasons }) => [resultRow(show), ...seasons.map((x) => resultRow(x, true))]) : [h('div', { class: 'empty' }, `No ${{ anime: 'anime', tv: 'TV shows', movie: 'movies' }[searchSource.value]} found for “${q}”.`)]));
+    resultsEl.replaceChildren(...(found.length ? foldSeasons(found).flatMap(({ show, seasons }) => [resultRow(show), ...seasons.map((x) => resultRow(x, true))]) : [h('div', { class: 'empty' }, `${{ all: 'Nothing', anime: 'No anime', tv: 'No TV shows', movie: 'No movies' }[searchSource.value]} found for “${q}”.`)]));
   } catch (e) {
     if (seq !== searchSeq) return;
     resultsEl.replaceChildren(h('div', { class: 'empty' }, `Search failed: ${e.message}`));
@@ -2614,6 +2682,7 @@ profileMenu.addEventListener('click', async (e) => {
     return signOut();
   }
   if (go === 'tour') return startTour();
+  if (go === 'news') return showNews(true);
   if (go === 'install') return runInstall();
   setTab(go);
   window.scrollTo(0, 0);

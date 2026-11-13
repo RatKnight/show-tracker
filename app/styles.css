@@ -309,6 +309,18 @@ details[open] > summary { margin-bottom: 10px; }
 .menu button[hidden] { display: none; }
 .menu button:hover, .menu button:focus-visible { background: var(--panel-2); outline: none; }
 
+/* ---------- what's new ---------- */
+.news { position: fixed; inset: 0; z-index: 35; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / .55); }
+.news[hidden] { display: none; }
+.news-card {
+  width: min(520px, 100%); max-height: calc(100vh - 32px); overflow: auto; padding: 18px 20px 16px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 16px 40px rgb(0 0 0 / .45);
+}
+.news-card h3 { margin: 0 0 4px; font-size: 1.15rem; }
+.news-card h4 { margin: 14px 0 6px; font-size: 1rem; }
+.news-card ul { margin: 0 0 12px; padding-left: 20px; }
+.news-card li { margin: 6px 0; line-height: 1.45; }
+
 /* ---------- install offer ---------- */
 .install {
   position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 25; margin: 0 auto; max-width: 520px;

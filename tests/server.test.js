@@ -1693,7 +1693,7 @@ test('http: notifications go to the devices that asked, a device has one owner, 
 test('the browser scripts parse', async () => {
   // They only run in a browser, so nothing else here would notice a syntax error in them.
   const { execFileSync } = await import('node:child_process');
-  for (const file of ['app/js/app.js', 'app/js/core.js', 'app/sw.js']) execFileSync(process.execPath, ['--check', new URL(`../${file}`, import.meta.url).pathname]);
+  for (const file of ['app/js/app.js', 'app/js/core.js', 'app/js/changes.js', 'app/sw.js']) execFileSync(process.execPath, ['--check', new URL(`../${file}`, import.meta.url).pathname]);
 });
 
 test('request limiter: stays inside the allowance, lets a waiting person go first, waits out a refusal', async () => {
@@ -1813,4 +1813,56 @@ test('http: season line-ups and premieres are stored across restarts; a repeated
   const stale = await back.req('GET', '/api/premieres');
   assert.equal(stale.status, 200);
   assert.equal(stale.body.list.length, 1);
+});
+
+test('http: search covers every category by default; TV and film suggestions; a TMDB series is tracked through TVmaze', async (t) => {
+  const { setupCode, client, sources, store } = await serve(t);
+  const ann = client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+
+  // No category given: anime, TV and films take turns.
+  sources.searchTv = async (q) => [{ ...fakeShow(40, { t: Date.now() }), key: 'tvmaze:40', source: 'tvmaze', title: `${q} (TV)` }];
+  const all = (await ann.req('GET', '/api/search?q=severance')).body;
+  assert.deepEqual(all.map((s) => s.source), ['anilist', 'tvmaze', 'tmdb']);
+  assert.deepEqual((await ann.req('GET', '/api/search?source=tv&q=severance')).body.map((s) => s.source), ['tvmaze']);
+  // One source failing leaves the others.
+  sources.searchAnime = async () => Promise.reject(new Error('AniList down'));
+  assert.deepEqual((await ann.req('GET', '/api/search?q=other')).body.map((s) => s.source), ['tvmaze', 'tmdb']);
+
+  // Popular lists and "because you track" suggestions.
+  const series = (id, title) => ({ key: `tmdbtv:${id}`, source: 'tmdbtv', id, kind: 'TV', title, streams: [], episodes: [] });
+  let similarAsked = 0;
+  sources.fetchTrending = async () => ({ tv: [series(1, 'Hit Series'), series(2, 'Other Series')], movies: [fakeMovie(300, { t: Date.now() }), fakeMovie(301, { t: Date.now() })] });
+  sources.fetchSimilar = async (kind, id) => (similarAsked++, kind === 'movie' ? [fakeMovie(310, { t: Date.now() })] : [series(id + 100, 'Like it')]);
+  sources.resolveTv = async (id) => (id === 1 ? 77 : null);
+  sources.fetchTv = async (id) => ({ ...fakeShow(id, { t: Date.now() }), key: `tvmaze:${id}`, source: 'tvmaze' });
+  let popular = (await ann.req('GET', '/api/popular')).body;
+  assert.deepEqual([popular.recs.length, popular.tv.length, popular.movies.length], [0, 2, 2]);
+
+  // Tracking a series from the list goes through TVmaze; one TVmaze does not know is refused plainly.
+  const added = await ann.req('POST', '/api/shows', { source: 'tmdbtv', id: 1 });
+  assert.deepEqual(Object.keys(added.body.shows), ['tvmaze:77']);
+  const missing = await ann.req('POST', '/api/shows', { source: 'tmdbtv', id: 2 });
+  assert.equal(missing.status, 404);
+  assert.match(missing.body.error, /No episode schedule/);
+  await ann.req('POST', '/api/shows', { source: 'tmdb', id: 300 });
+
+  // Tracked titles leave the lists; the film now feeds suggestions, asked for once.
+  popular = (await ann.req('GET', '/api/popular')).body;
+  assert.deepEqual(popular.tv.map((x) => x.title), ['Other Series']);
+  assert.deepEqual(popular.movies.map((x) => x.key), ['tmdb:301']);
+  assert.deepEqual(popular.recs.map((x) => [x.key, x.because]), [['tmdb:310', ['Film 300']]]);
+  await ann.req('GET', '/api/popular');
+  assert.equal(similarAsked, 1, 'answers are stored');
+
+  // "Not interested" works for these too.
+  assert.equal((await ann.req('POST', '/api/discover/dismiss', { key: 'tmdbtv:2' })).status, 200);
+  assert.equal((await ann.req('POST', '/api/discover/dismiss', { key: 'evil:2' })).status, 400);
+  assert.deepEqual((await ann.req('GET', '/api/popular')).body.tv, []);
+  assert.equal(store.data.tvIds[1], 77);
+
+  // Which update notes someone has seen is remembered.
+  assert.equal((await ann.req('GET', '/api/state')).body.settings.seenChanges, '');
+  assert.equal((await ann.req('PUT', '/api/settings', { seenChanges: '2026-11-13' })).body.settings.seenChanges, '2026-11-13');
+  assert.equal((await ann.req('PUT', '/api/settings', { seenChanges: '<script>' })).body.settings.seenChanges, '2026-11-13');
 });

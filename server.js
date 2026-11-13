@@ -302,6 +302,16 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
   // Search answers are kept for an hour, in memory only: what people look for is not written down.
   const searches = new Map();
   async function search(kind, q) {
+    if (kind === 'all') {
+      // Every category at once, best matches of each taking turns. One source being down does not sink the rest.
+      const kinds = ['anime', 'tv', ...(movies() ? ['movie'] : [])];
+      const got = await Promise.allSettled(kinds.map((k) => search(k, q)));
+      const lists = got.filter((g) => g.status === 'fulfilled').map((g) => g.value.slice(0, 8));
+      if (!lists.length) throw got[0].reason;
+      const out = [];
+      for (let i = 0; i < 8; i++) for (const list of lists) if (list[i]) out.push(list[i]);
+      return out;
+    }
     const key = `${kind}:${q.toLowerCase()}`;
     const hit = searches.get(key);
     if (hit && now() - hit.at < 60 * 60 * 1000) return hit.found;
@@ -683,13 +693,22 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         if (q.length < 2) return reply(200, []);
         const kind = url.searchParams.get('source');
         if (kind === 'movie' && !movies()) throw new HttpError(400, 'Movies are not set up on this site.');
-        return reply(200, await search(kind === 'movie' || kind === 'tv' ? kind : 'anime', q));
+        return reply(200, await search(['movie', 'tv', 'anime'].includes(kind) ? kind : 'all', q));
       }
 
       case 'POST /api/shows': {
-        const { source, id } = await readJson(req);
-        if (!['anilist', 'tvmaze', 'tmdb'].includes(source) || !Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Unknown show.');
-        if (source === 'tmdb' && !movies()) throw new HttpError(400, 'Movies are not set up on this site.');
+        let { source, id } = await readJson(req);
+        if (!['anilist', 'tvmaze', 'tmdb', 'tmdbtv'].includes(source) || !Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Unknown show.');
+        if (source.startsWith('tmdb') && !movies()) throw new HttpError(400, 'Movies are not set up on this site.');
+        if (source === 'tmdbtv') {
+          // A series from the "TV & films" lists: schedules come from TVmaze, so find it there first.
+          if (!(id in data.tvIds)) {
+            data.tvIds[id] = await sources.resolveTv(id);
+            store.save();
+          }
+          if (!data.tvIds[id]) throw new HttpError(404, 'No episode schedule is available for this series yet.');
+          [source, id] = ['tvmaze', data.tvIds[id]];
+        }
         await tracker.addShow(u, source, id);
         return reply(200, publicState(u));
       }
@@ -718,6 +737,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           autoTrackSeasons: typeof body.autoTrackSeasons === 'boolean' ? body.autoTrackSeasons : cur.autoTrackSeasons,
           cinemaAlerts: typeof body.cinemaAlerts === 'boolean' ? body.cinemaAlerts : cur.cinemaAlerts,
           tourDone: typeof body.tourDone === 'boolean' ? body.tourDone : Boolean(cur.tourDone),
+          seenChanges: typeof body.seenChanges === 'string' && /^[\w.-]{1,20}$/.test(body.seenChanges) ? body.seenChanges : cur.seenChanges || '',
         };
         const problem = validateChannels(next);
         if (problem) throw new HttpError(400, problem);
@@ -817,10 +837,44 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
       case 'POST /api/discover/dismiss': {
         const { key } = await readJson(req);
-        if (typeof key !== 'string' || !/^anilist:\d+$/.test(key)) throw new HttpError(400, 'Unknown show.');
+        if (typeof key !== 'string' || !/^(anilist|tmdb|tmdbtv):\d+$/.test(key)) throw new HttpError(400, 'Unknown show.');
         if (!u.dismissed.includes(key)) u.dismissed = [...u.dismissed, key].slice(-2000);
         store.save();
         return reply(200, publicDiscover(u));
+      }
+
+      case 'GET /api/popular': {
+        if (!movies()) throw new HttpError(400, 'Movies are not set up on this site.');
+        const HALF_DAY = 12 * 60 * 60 * 1000;
+        const trending = await storedList('trending', HALF_DAY, () => sources.fetchTrending());
+        // Series and films this person tracks, as TMDB knows them.
+        const mine = tracker
+          .showsOf(u)
+          .map((s) => (s.source === 'tmdb' ? { kind: 'movie', tmdbId: s.id, title: s.title } : s.source === 'tvmaze' && data.availability[s.key]?.tmdbId ? { kind: 'tv', tmdbId: data.availability[s.key].tmdbId, title: s.title } : null))
+          .filter(Boolean);
+        const trackedTv = new Set(mine.filter((m) => m.kind === 'tv').map((m) => m.tmdbId));
+        const hidden = (x) => u.dismissed.includes(x.key) || (x.source === 'tmdb' ? Boolean(u.shows[x.key]) : trackedTv.has(x.id) || Boolean(u.shows[`tvmaze:${data.tvIds[x.id]}`]));
+        // "People who watched X also liked": each tracked title votes, as for anime. A few
+        // new lookups per visit; the answers are stored for a week.
+        const votes = new Map();
+        let lookups = 0;
+        for (const m of mine) {
+          const name = `similar:${m.kind}:${m.tmdbId}`;
+          if (!data.lists[name] && ++lookups > 6) continue;
+          const list = await storedList(name, 6 * 24 * 60 * 60 * 1000, () => sources.fetchSimilar(m.kind, m.tmdbId)).catch(() => []);
+          list.forEach((x, i) => {
+            const v = votes.get(x.key) || { show: x, score: 0, because: [] };
+            v.score += Math.max(1, 10 - i);
+            v.because.push(m.title);
+            votes.set(x.key, v);
+          });
+        }
+        const recs = [...votes.values()]
+          .filter((v) => !hidden(v.show))
+          .sort((a, b) => b.score - a.score || (b.show.score || 0) - (a.show.score || 0))
+          .slice(0, 30)
+          .map((v) => ({ ...v.show, because: v.because.slice(0, 3) }));
+        return reply(200, { recs, tv: trending.tv.filter((x) => !hidden(x)), movies: trending.movies.filter((x) => !hidden(x)) });
       }
 
       case 'GET /api/premieres': {
