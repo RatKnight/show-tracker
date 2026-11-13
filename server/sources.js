@@ -317,6 +317,56 @@ export async function searchMovies(q) {
   return data.results.slice(0, 12).map((m) => normalizeTmdb(m));
 }
 
+/** A TMDB series as a Discover tile. It is tracked through TVmaze, which resolveTv finds when asked. */
+const tmdbSeries = (t) => ({
+  key: `tmdbtv:${t.id}`,
+  source: 'tmdbtv',
+  id: t.id,
+  kind: 'TV',
+  title: t.name || `Series #${t.id}`,
+  altTitle: t.original_name && t.original_name !== t.name ? t.original_name : null,
+  image: t.poster_path ? `https://image.tmdb.org/t/p/w185${t.poster_path}` : null,
+  url: `https://www.themoviedb.org/tv/${t.id}`,
+  status: '',
+  year: t.first_air_date ? Number(t.first_air_date.slice(0, 4)) || null : null,
+  format: 'TV',
+  genres: [],
+  score: t.vote_count ? Math.round(t.vote_average * 10) : null,
+  note: null,
+  streams: [],
+  episodes: [],
+});
+// Anime has its own tabs (and a better source), so it is left out of the general lists.
+const isAnime = (r) => r.genre_ids?.includes(16) && (r.origin_country?.includes('JP') || r.original_language === 'ja');
+
+/** What is popular this week: { tv: [tiles], movies: [shows] }. */
+export async function fetchTrending() {
+  const [tv, movies] = await Promise.all([tmdb('/trending/tv/week'), tmdb('/trending/movie/week')]);
+  return {
+    tv: (tv.results || []).filter((r) => !isAnime(r)).slice(0, 20).map(tmdbSeries),
+    movies: (movies.results || []).filter((r) => !isAnime(r)).slice(0, 20).map((m) => normalizeTmdb(m)),
+  };
+}
+
+/** What viewers of one series ('tv') or film ('movie') also liked, best first. */
+export async function fetchSimilar(kind, tmdbId) {
+  const data = await tmdb(`/${kind === 'movie' ? 'movie' : 'tv'}/${tmdbId}/recommendations`);
+  const list = (data.results || []).filter((r) => !isAnime(r)).slice(0, 10);
+  return kind === 'movie' ? list.map((m) => normalizeTmdb(m)) : list.map(tmdbSeries);
+}
+
+/** The TVmaze id of a TMDB series, or null when TVmaze does not list it. */
+export async function resolveTv(tmdbId) {
+  const ids = await tmdb(`/tv/${tmdbId}/external_ids`);
+  for (const [param, value] of [['thetvdb', ids.tvdb_id], ['imdb', ids.imdb_id]]) {
+    if (!value) continue;
+    const res = await fetch(`${TVMAZE}/lookup/shows?${param}=${encodeURIComponent(value)}`, { signal: AbortSignal.timeout(20000) });
+    if (res.ok) return (await res.json())?.id || null;
+    if (res.status !== 404) throw new Error(`TVmaze request failed (${res.status})`);
+  }
+  return null;
+}
+
 /** One movie with its US release dates and where it streams. */
 export async function fetchMovie(id, now = Date.now()) {
   return normalizeTmdb(await tmdb(`/movie/${id}?append_to_response=release_dates,watch/providers`), now);

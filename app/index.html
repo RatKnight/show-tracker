@@ -20,6 +20,7 @@
     </button>
     <form class="search" id="search-form" role="search" autocomplete="off">
       <select id="search-source" aria-label="What to search">
+        <option value="all" selected>All</option>
         <option value="anime">Anime</option>
         <option value="tv">TV</option>
       </select>
@@ -35,6 +36,7 @@
           <div class="menu-who muted small" id="menu-who"></div>
           <button type="button" role="menuitem" data-go="profile">Profile</button>
           <button type="button" role="menuitem" data-go="settings">Settings</button>
+          <button type="button" role="menuitem" data-go="news">What’s new</button>
           <button type="button" role="menuitem" data-go="tour">Take the tour</button>
           <button type="button" role="menuitem" data-go="install" id="menu-install" hidden>Install the app</button>
           <button type="button" role="menuitem" data-go="logout">Log out</button>
@@ -57,6 +59,13 @@
     <div class="install-actions">
       <button type="button" class="btn primary" id="install-yes">Install</button>
       <button type="button" class="btn" id="install-no">Not now</button>
+    </div>
+  </div>
+  <div class="news" id="news" hidden>
+    <div class="news-card" role="dialog" aria-modal="true" aria-labelledby="news-title">
+      <h3 id="news-title">What’s new</h3>
+      <div id="news-body"></div>
+      <div class="tour-actions"><span class="grow"></span><button type="button" class="btn primary" id="news-ok">Got it</button></div>
     </div>
   </div>
   <div class="tour" id="tour" hidden>
