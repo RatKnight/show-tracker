@@ -159,6 +159,7 @@ export function openStore(dir, { dataKey = '' } = {}) {
     availability: {}, // show key -> { tmdbId, byRegion: { US: [service names] }, links, at }: where it streams
     dubs: {}, // anime show key -> [{ id, label, airsAt, dub: true, watchId }]: English dub episodes
     dubsAt: 0,
+    shelf: {}, // show key -> { show, at }: schedules fetched ahead for shows on the Discover pages, ready for when one is tracked
     tvIds: {}, // TMDB series id -> TVmaze id, once looked up
     lists: {}, // name -> { at, value }: season line-ups and premiere lists as fetched, kept across restarts
     related: {}, // anime id -> { sequels, recs, at }: what follows it and what its viewers recommend, as fetched

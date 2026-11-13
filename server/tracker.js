@@ -14,6 +14,8 @@ const MAX_ALERTS = 100;
 const MAX_TRACKED = 1000;
 export const REFRESH_EVERY = 30 * 60 * 1000;
 export const DISCOVER_EVERY = 12 * 60 * 60 * 1000;
+/** How long a schedule fetched ahead of time may be used as it is when the show is tracked. */
+export const SHELF_FRESH = 12 * 60 * 60 * 1000;
 
 export function createTracker({ store, sources, send, push = async () => [], sendFile = async () => {}, mailer = { enabled: false }, now = Date.now }) {
   const { data } = store;
@@ -510,6 +512,12 @@ export function createTracker({ store, sources, send, push = async () => [], sen
     // A ceiling per person keeps one account from swamping the schedule sources for everyone.
     const room = Math.max(0, MAX_TRACKED - Object.keys(u.shows).length);
     const missing = wanted.filter((w) => !u.shows[keyOf(w)]).slice(0, room);
+    // A show fetched ahead of time (it was on a Discover page) needs no request now.
+    for (const w of missing) {
+      const ready = data.shelf[keyOf(w)];
+      if (!data.catalog[keyOf(w)] && ready && now() - ready.at < SHELF_FRESH) data.catalog[keyOf(w)] = ready.show;
+      delete data.shelf[keyOf(w)];
+    }
     const toFetch = missing.filter((w) => !data.catalog[keyOf(w)]);
     const animeIds = toFetch.filter((w) => w.source === 'anilist').map((w) => w.id);
     const fetched = animeIds.length ? await sources.fetchAnime(animeIds, now(), { urgent }) : [];
