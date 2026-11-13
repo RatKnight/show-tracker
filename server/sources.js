@@ -17,13 +17,96 @@ const MEDIA_FIELDS = `
 // Formats worth suggesting as "a new season" (skips music videos, specials, OVAs).
 const SERIES_FORMATS = ['TV', 'TV_SHORT', 'ONA', 'MOVIE'];
 
-async function gql(query, variables) {
-  const res = await fetch(ANILIST, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (res.status === 429) throw new Error('AniList is rate limiting requests — try again in a minute.');
+/**
+ * Keeps requests to a source inside its per-minute allowance.
+ *
+ * Background work (schedule refreshes, suggestions, season lookups) stops short
+ * of the allowance so that something a person is waiting for (a search, adding
+ * a show) always has room, and goes ahead of whatever is queued. When the
+ * source says "too many requests" anyway, everything waits for as long as it
+ * asks and the request is sent again; only a person's request gives up, and
+ * only if the wait would be long.
+ */
+export function createLimiter({ perMinute = 28, reserve = 8, patience = 20000, now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const sent = []; // when each request of the last minute went out
+  const waiting = { urgent: [], normal: [] };
+  let limit = perMinute;
+  let pausedUntil = 0;
+  let running = false;
+
+  /** How long until a request of this kind may go out (0 = now). */
+  const delay = (urgent) => {
+    const t = now();
+    while (sent.length && sent[0] <= t - 60000) sent.shift();
+    const room = urgent ? limit : Math.max(1, limit - reserve);
+    const full = sent.length >= room ? sent[sent.length - room] + 60000 - t : 0;
+    return Math.max(0, pausedUntil - t, full);
+  };
+
+  async function pump() {
+    if (running) return;
+    running = true;
+    try {
+      while (waiting.urgent.length || waiting.normal.length) {
+        const urgent = waiting.urgent.length > 0;
+        const wait = delay(urgent);
+        const job = (urgent ? waiting.urgent : waiting.normal)[0];
+        if (urgent && wait > patience) {
+          waiting.urgent.shift();
+          job.reject(new Error(job.busy));
+          continue;
+        }
+        if (wait > 0) {
+          // Short naps, so an urgent request arriving meanwhile is noticed.
+          await sleep(Math.min(wait, 250));
+          continue;
+        }
+        (urgent ? waiting.urgent : waiting.normal).shift();
+        sent.push(now());
+        try {
+          const res = await job.send();
+          const allowed = Number(res.headers.get('x-ratelimit-limit'));
+          if (allowed > 0) limit = Math.max(4, Math.min(perMinute, allowed - 2));
+          if (res.status === 429) {
+            const after = Number(res.headers.get('retry-after'));
+            pausedUntil = now() + (after > 0 ? Math.min(after, 120) : 60) * 1000;
+            job.tries++;
+            // Ask again once the pause is over, unless this one has been turned away repeatedly.
+            if (job.tries < 4) (job.urgent ? waiting.urgent : waiting.normal).unshift(job);
+            else job.reject(new Error(job.busy));
+            continue;
+          }
+          job.resolve(res);
+        } catch (e) {
+          job.reject(e);
+        }
+      }
+    } finally {
+      running = false;
+    }
+  }
+
+  /** send() makes the request and returns the Response; busy is the error text if it cannot be made in time. */
+  return (send, { urgent = false, busy = 'Too many requests — try again in a minute.' } = {}) =>
+    new Promise((resolve, reject) => {
+      (urgent ? waiting.urgent : waiting.normal).push({ send, urgent, busy, tries: 0, resolve, reject });
+      pump();
+    });
+}
+
+const anilistLimit = createLimiter();
+
+async function gql(query, variables, { urgent = false } = {}) {
+  const res = await anilistLimit(
+    () =>
+      fetch(ANILIST, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query, variables }),
+        signal: AbortSignal.timeout(20000),
+      }),
+    { urgent, busy: 'AniList is rate limiting requests — try again in a minute.' },
+  );
   const json = await res.json().catch(() => null);
   if (!res.ok || !json || json.errors) {
     throw new Error(json?.errors?.[0]?.message || `AniList request failed (${res.status})`);
@@ -38,7 +121,8 @@ async function tvmaze(path) {
   return res.json();
 }
 
-export async function searchAnime(q) {
+/** A search someone typed is urgent; the same lookup done in the background is not. */
+export async function searchAnime(q, { urgent = true } = {}) {
   const data = await gql(
     `query ($q: String) {
       Page(perPage: 12) {
@@ -46,6 +130,7 @@ export async function searchAnime(q) {
       }
     }`,
     { q },
+    { urgent },
   );
   return data.Page.media.map((m) => normalizeAnilist(m, undefined));
 }
@@ -56,7 +141,7 @@ export async function searchTv(q) {
 }
 
 /** Full details + airing schedule for a set of AniList ids. */
-export async function fetchAnime(ids, now = Date.now()) {
+export async function fetchAnime(ids, now = Date.now(), { urgent = false } = {}) {
   const shows = [];
   for (let i = 0; i < ids.length; i += 50) {
     const chunk = ids.slice(i, i + 50);
@@ -65,6 +150,7 @@ export async function fetchAnime(ids, now = Date.now()) {
         Page(perPage: 50) { media(id_in: $ids, type: ANIME) { ${MEDIA_FIELDS} } }
       }`,
       { ids: chunk },
+      { urgent },
     );
 
     const schedule = new Map(chunk.map((id) => [id, []]));
@@ -84,6 +170,7 @@ export async function fetchAnime(ids, now = Date.now()) {
           to: Math.floor((now + FUTURE_WINDOW) / 1000),
           page,
         },
+        { urgent },
       );
       for (const n of data.Page.airingSchedules) schedule.get(n.mediaId)?.push(n);
       if (!data.Page.pageInfo.hasNextPage) break;

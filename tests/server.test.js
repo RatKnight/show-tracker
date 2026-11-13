@@ -222,6 +222,7 @@ test('timing helpers', () => {
 
 
 /** A store with one user in it, plus a tracker wired to fakes. */
+const HALF_DAY = 12 * 60 * 60 * 1000;
 function rig({ start = Date.UTC(2026, 10, 12), fixedEpisodes = true } = {}) {
   const clock = { t: start };
   const sent = [];
@@ -306,7 +307,7 @@ test('tracker records refresh failures and backs off', async () => {
 test('new seasons: alert once, never on the first scan; followed series pick them up automatically', async () => {
   // With automatic tracking switched off: listed and announced, not added.
   {
-    const { sent, sources, user, tracker } = rig();
+    const { sent, sources, user, tracker, clock } = rig();
     user.settings.autoTrackSeasons = false;
     sources.related.set(1, { sequels: [media(10, 'One S2', 'NOT_YET_RELEASED')], recs: [{ rating: 5, media: media(50, 'Rec A') }] });
     await tracker.addShow(user, 'anilist', 1);
@@ -316,6 +317,9 @@ test('new seasons: alert once, never on the first scan; followed series pick the
     assert.deepEqual(Object.keys(user.shows), ['anilist:1']);
 
     sources.related.set(10, { sequels: [media(11, 'One S3', 'NOT_YET_RELEASED')], recs: [] });
+    await tracker.refreshDiscover(user);
+    assert.equal(sent.length, 0, 'answers are kept: nothing is asked again so soon');
+    clock.t += HALF_DAY; // the next scheduled rebuild
     await tracker.refreshDiscover(user);
     assert.equal(sent.length, 1);
     assert.equal(sent[0][0].title, 'One S3');
@@ -328,7 +332,7 @@ test('new seasons: alert once, never on the first scan; followed series pick the
 
   // With it on (the default): upcoming seasons join the list and form one series.
   {
-    const { sent, sources, user, tracker } = rig();
+    const { sent, sources, user, tracker, clock } = rig();
     sources.related.set(1, { sequels: [media(10, 'One S2', 'FINISHED')], recs: [] });
     sources.related.set(10, { sequels: [media(11, 'One S3', 'NOT_YET_RELEASED')], recs: [] });
     await tracker.addShow(user, 'anilist', 1);
@@ -338,6 +342,7 @@ test('new seasons: alert once, never on the first scan; followed series pick the
     assert.deepEqual(user.discover.series, { 'anilist:1': { id: 'anilist:1', title: 'Show 1' }, 'anilist:11': { id: 'anilist:1', title: 'Show 1' } });
 
     sources.related.set(11, { sequels: [media(12, 'One S4', 'RELEASING')], recs: [] });
+    clock.t += HALF_DAY;
     await tracker.refreshDiscover(user);
     assert.ok(user.shows['anilist:12']);
     assert.equal(sent.flat().at(-1).body, 'New season of Show 1 is airing. Added to your list.');
@@ -601,6 +606,7 @@ test('http: setup, sign-in and the single-user features', async (t) => {
   assert.equal((await req('GET', '/api/season?which=next')).body.list.length, 1);
   assert.equal((await req('PUT', '/api/settings', { autoTrackSeasons: false })).body.settings.autoTrackSeasons, false);
   sources.related.set(5, { sequels: [media(60, 'Five S2', 'RELEASING')], recs: [{ rating: 5, media: media(61, 'Rec') }] });
+  store.data.related = {}; // as at the next scheduled rebuild, when kept answers have aged out
   await tracker.refreshDiscover(Object.values(store.data.users)[0], { silent: true });
   let disc = await req('GET', '/api/discover');
   assert.deepEqual([disc.body.sequels.map((x) => x.key), disc.body.recs.map((x) => x.key)], [['anilist:60'], ['anilist:61']]);
@@ -1590,4 +1596,177 @@ test('http: the guided tour is offered until it is finished, and that is remembe
   assert.equal((await ann.req('PUT', '/api/settings', { tourDone: true })).body.settings.tourDone, true);
   // Saving another setting does not bring it back.
   assert.equal((await ann.req('PUT', '/api/settings', { region: 'NO' })).body.settings.tourDone, true);
+});
+
+test('web push: the message is encrypted for the device and signed as this server', async () => {
+  const { newVapidKeys, vapidHeader, encryptPayload, cleanSubscription } = await import('../server/push.js');
+  const crypto = await import('node:crypto');
+  // A browser's side of a subscription.
+  const ua = crypto.createECDH('prime256v1');
+  const uaPublic = ua.generateKeys();
+  const auth = crypto.randomBytes(16);
+  const sub = cleanSubscription({ endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys: { p256dh: uaPublic.toString('base64url'), auth: auth.toString('base64url') } });
+  assert.ok(sub);
+
+  // Decrypt as the browser would (RFC 8291).
+  const body = encryptPayload(sub, 'hello there');
+  const salt = body.subarray(0, 16);
+  assert.equal(body.readUInt32BE(16), 4096);
+  const asPublic = body.subarray(21, 21 + body[20]);
+  const ikm = Buffer.from(crypto.hkdfSync('sha256', ua.computeSecret(asPublic), auth, Buffer.concat([Buffer.from('WebPush: info\0'), uaPublic, asPublic]), 32));
+  const key = Buffer.from(crypto.hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: aes128gcm\0'), 16));
+  const nonce = Buffer.from(crypto.hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: nonce\0'), 12));
+  const sealed = body.subarray(21 + body[20]);
+  const d = crypto.createDecipheriv('aes-128-gcm', key, nonce);
+  d.setAuthTag(sealed.subarray(-16));
+  assert.equal(Buffer.concat([d.update(sealed.subarray(0, -16)), d.final()]).toString(), 'hello there\x02');
+  assert.notDeepEqual(encryptPayload(sub, 'hello there'), body, 'fresh keys every time');
+
+  // The sender's proof verifies against the public key browsers subscribed with.
+  const vapid = newVapidKeys();
+  const header = vapidHeader(sub.endpoint, vapid, 'https://shows.example', 1_000_000);
+  const [, jwt, k] = /^vapid t=([\w.-]+), k=([\w-]+)$/.exec(header);
+  assert.equal(k, vapid.publicKey);
+  const [h, c, s] = jwt.split('.');
+  assert.deepEqual(JSON.parse(Buffer.from(c, 'base64url')), { aud: 'https://fcm.googleapis.com', exp: 1000 + 43200, sub: 'https://shows.example' });
+  const raw = Buffer.from(vapid.publicKey, 'base64url');
+  const pub = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: raw.subarray(1, 33).toString('base64url'), y: raw.subarray(33).toString('base64url') }, format: 'jwk' });
+  assert.ok(crypto.verify('sha256', Buffer.from(`${h}.${c}`), { key: pub, dsaEncoding: 'ieee-p1363' }, Buffer.from(s, 'base64url')));
+
+  // Only real push services, over https, with well-formed keys.
+  const keys = { p256dh: uaPublic.toString('base64url'), auth: auth.toString('base64url') };
+  for (const endpoint of ['http://fcm.googleapis.com/x', 'https://localhost/x', 'https://169.254.169.254/x', 'https://fcm.googleapis.com.evil.example/x', 'https://evil.example/fcm.googleapis.com', 'https://fcm.googleapis.com:8443/x', 'nonsense']) {
+    assert.equal(cleanSubscription({ endpoint, keys }), null, endpoint);
+  }
+  assert.ok(cleanSubscription({ endpoint: 'https://updates.push.services.mozilla.com/wpush/v2/abc', keys }));
+  assert.equal(cleanSubscription({ endpoint: sub.endpoint, keys: { ...keys, auth: 'c2hvcnQ' } }), null);
+  assert.equal(cleanSubscription({ endpoint: sub.endpoint }), null);
+});
+
+test('http: notifications go to the devices that asked, a device has one owner, dead ones are dropped', async (t) => {
+  const crypto = await import('node:crypto');
+  const pushed = [];
+  const answers = {};
+  const { setupCode, client } = await serve(t, { pushPost: async (endpoint, headers, body) => (pushed.push({ endpoint, headers, body }), answers[endpoint] || 201) });
+  const device = (n) => ({ endpoint: `https://fcm.googleapis.com/fcm/send/${n}`, keys: { p256dh: crypto.createECDH('prime256v1').generateKeys().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') } });
+  const ann = client('198.51.100.1');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  await ann.unlockAdmin('password-ann');
+  const bob = client('198.51.100.2');
+  await bob.req('POST', '/api/signup', { token: (await ann.req('POST', '/api/admin/invites')).body.token, username: 'bob', password: 'password-bob' });
+
+  assert.equal((await ann.req('POST', '/api/test-alert')).status, 400, 'nothing to send to yet');
+  assert.equal((await ann.req('POST', '/api/push', { subscription: { endpoint: 'https://evil.example/x', keys: device(0).keys } })).status, 400);
+  const phone = device('phone');
+  const state = (await ann.req('POST', '/api/push', { subscription: phone, name: 'Chrome on Android' })).body;
+  assert.match(state.pushKey, /^[\w-]{87}$/);
+  assert.deepEqual(state.me.pushDevices.map((d) => d.name), ['Chrome on Android']);
+  assert.ok(!JSON.stringify(state).includes(phone.endpoint), 'the address itself is never sent back');
+  await ann.req('POST', '/api/push', { subscription: device('laptop'), name: 'Firefox on Windows' });
+
+  assert.equal((await ann.req('POST', '/api/test-alert')).status, 200);
+  assert.deepEqual(pushed.map((p) => p.endpoint.split('/').pop()), ['phone', 'laptop']);
+  assert.equal(pushed[0].headers['Content-Encoding'], 'aes128gcm');
+  assert.match(pushed[0].headers.Authorization, /^vapid t=/);
+  assert.ok(!pushed[0].body.includes('Test alert'), 'not readable by the push service');
+
+  // Bob signs in on Ann's phone browser and turns notifications on: the device is now his alone.
+  await bob.req('POST', '/api/push', { subscription: phone, name: 'Chrome on Android' });
+  assert.deepEqual((await ann.req('GET', '/api/state')).body.me.pushDevices.map((d) => d.name), ['Firefox on Windows']);
+  assert.deepEqual((await bob.req('GET', '/api/state')).body.me.pushDevices.map((d) => d.name), ['Chrome on Android']);
+  // Bob cannot remove Ann's device by its id.
+  const laptopId = (await ann.req('GET', '/api/state')).body.me.pushDevices[0].id;
+  await bob.req('DELETE', `/api/push?id=${laptopId}`);
+  assert.equal((await ann.req('GET', '/api/state')).body.me.pushDevices.length, 1);
+
+  // The browser says the subscription is gone: it is forgotten without an error.
+  answers['https://fcm.googleapis.com/fcm/send/laptop'] = 410;
+  assert.equal((await ann.req('POST', '/api/test-alert')).status, 200);
+  assert.equal((await ann.req('GET', '/api/state')).body.me.pushDevices.length, 0);
+  // A push service failure is reported.
+  answers[phone.endpoint] = 500;
+  const failed = await bob.req('POST', '/api/test-alert');
+  assert.equal(failed.status, 502);
+  assert.match(failed.body.error, /Chrome on Android.*500/);
+});
+
+test('the browser scripts parse', async () => {
+  // They only run in a browser, so nothing else here would notice a syntax error in them.
+  const { execFileSync } = await import('node:child_process');
+  for (const file of ['app/js/app.js', 'app/js/core.js', 'app/sw.js']) execFileSync(process.execPath, ['--check', new URL(`../${file}`, import.meta.url).pathname]);
+});
+
+test('request limiter: stays inside the allowance, lets a waiting person go first, waits out a refusal', async () => {
+  const { createLimiter } = await import('../server/sources.js');
+  const clock = { t: 1_000_000 };
+  const opts = { perMinute: 10, reserve: 4, patience: 20000, now: () => clock.t, sleep: async (ms) => void (clock.t += ms) };
+  const ok = () => new Response('{}', { status: 200 });
+  const sentAt = [];
+
+  // Background work uses 6 of the 10 a minute; the 7th waits for the minute to turn.
+  let limit = createLimiter(opts);
+  for (let i = 0; i < 7; i++) await limit(async () => (sentAt.push(clock.t), ok()));
+  assert.deepEqual(sentAt.slice(0, 6), Array(6).fill(1_000_000));
+  assert.ok(sentAt[6] >= 1_060_000, 'held back until there is room');
+
+  // The reserve is there for someone waiting: an urgent request goes straight out, and ahead of the queue.
+  limit = createLimiter(opts);
+  clock.t = 2_000_000;
+  const order = [];
+  const jobs = [];
+  for (let i = 0; i < 8; i++) jobs.push(limit(async () => (order.push(`bg${i}`), ok())));
+  jobs.push(limit(async () => (order.push(`urgent@${clock.t - 2_000_000}`), ok()), { urgent: true }));
+  await Promise.all(jobs);
+  assert.ok(order.indexOf('urgent@0') > 0 && order.indexOf('urgent@0') <= 6, `sent at once, before the held-back background work: ${order}`);
+
+  // "Too many requests": wait as long as asked, then send the same request again.
+  limit = createLimiter(opts);
+  clock.t = 3_000_000;
+  let calls = 0;
+  const res = await limit(async () => (++calls === 1 ? new Response('', { status: 429, headers: { 'Retry-After': '30' } }) : ok()));
+  assert.equal(res.status, 200);
+  assert.equal(calls, 2);
+  assert.ok(clock.t >= 3_030_000);
+
+  // Someone waiting is told rather than left hanging when the wait would be long.
+  limit = createLimiter(opts);
+  clock.t = 4_000_000;
+  await assert.rejects(limit(async () => new Response('', { status: 429, headers: { 'Retry-After': '60' } }), { urgent: true, busy: 'busy, try later' }), /busy, try later/);
+  // A failure of the request itself is passed on, and the queue carries on.
+  clock.t = 5_000_000;
+  await assert.rejects(limit(async () => Promise.reject(new Error('network down'))), /network down/);
+  assert.equal((await limit(async () => ok())).status, 200);
+  // The allowance the source announces is respected when it is lower than assumed.
+  limit = createLimiter({ ...opts, reserve: 0 });
+  clock.t = 6_000_000;
+  const stamps = [];
+  for (let i = 0; i < 5; i++) await limit(async () => (stamps.push(clock.t), new Response('{}', { status: 200, headers: { 'X-RateLimit-Limit': '6' } })));
+  assert.ok(stamps[4] >= 6_060_000, 'four a minute once the source says six');
+});
+
+test('suggestions: adding a show asks the source about that show only, and old answers cover an outage', async () => {
+  const { sources, user, tracker, clock, store } = rig();
+  const asked = [];
+  const real = sources.fetchRelated.bind(sources);
+  sources.fetchRelated = async (ids, opts) => (asked.push([...ids]), real(ids, opts));
+  sources.related.set(1, { sequels: [], recs: [{ rating: 5, media: media(50, 'Rec A') }] });
+  sources.related.set(2, { sequels: [], recs: [{ rating: 5, media: media(51, 'Rec B') }] });
+  await tracker.addShow(user, 'anilist', 1);
+  await tracker.refreshDiscover(user);
+  await tracker.addShow(user, 'anilist', 2);
+  await tracker.refreshDiscover(user);
+  await new Promise((r) => setTimeout(r, 20)); // let the rebuilds triggered by adding finish
+  await tracker.refreshDiscover(user);
+  assert.deepEqual(asked, [[1], [2]], 'each show asked about once');
+  assert.deepEqual(user.discover.recs.map((r) => r.key).sort(), ['anilist:50', 'anilist:51']);
+
+  // Half a day on, everything is asked again; if the source is down the stored answers still serve.
+  clock.t += HALF_DAY;
+  sources.fetchRelated = async () => Promise.reject(new Error('AniList down'));
+  await tracker.refreshDiscover(user);
+  assert.equal(user.discover.recs.length, 2);
+  // Answers nobody refreshed for a week are dropped.
+  clock.t += 8 * DAY;
+  tracker.removeShow(user, 'anilist:2');
+  assert.deepEqual(Object.keys(store.data.related), []);
 });
