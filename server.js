@@ -7,6 +7,7 @@ import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVICES, animeSeason } from './app/js/core.js';
 import { openStore, makeUser } from './server/store.js';
+import { createPusher, cleanSubscription } from './server/push.js';
 import { createTracker } from './server/tracker.js';
 import {
   hashPassword,
@@ -81,10 +82,12 @@ async function readJson(req, limit = 64 * 1024) {
   throw new HttpError(400, 'Invalid JSON.');
 }
 
-export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, sendFile = sendDiscordFile, mailer = createMailer(), publicUrl = '', trustProxy = false, now = Date.now } = {}) {
+export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, pushPost, sendFile = sendDiscordFile, mailer = createMailer(), publicUrl = '', trustProxy = false, now = Date.now } = {}) {
   const store = openStore(dataDir, { dataKey });
   const { data } = store;
-  const tracker = createTracker({ store, sources, send, sendFile, mailer, now });
+  // Push services want a contact for whoever sends: the site's own address.
+  const pusher = createPusher({ store, subject: /^https:\/\//.test(publicUrl) ? publicUrl : 'mailto:admin@show-tracker.invalid', post: pushPost, now });
+  const tracker = createTracker({ store, sources, send, push: pusher.send, sendFile, mailer, now });
 
   // Until the first account exists, creating it needs this code from the server
   // log, so a stranger who finds the site first cannot claim it.
@@ -227,7 +230,10 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       passkeys: u.passkeys.map((k) => ({ id: k.id, name: k.name, createdAt: k.createdAt })),
       apiTokens: u.apiTokens.map((t) => ({ id: t.id, name: t.name, createdAt: t.createdAt, lastUsedAt: t.lastUsedAt || null })),
       recoveryCodesLeft: u.recoveryCodes.length,
+      pushDevices: u.pushSubs.map((s) => ({ id: s.id, name: s.name, createdAt: s.createdAt })),
     },
+    // What a browser needs to subscribe this device to notifications.
+    pushKey: pusher.publicKey(),
     mail: mailer.enabled,
     movies: movies(),
     dubs: Boolean(sources.hasDubs?.()),
@@ -948,9 +954,29 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         return reply(200, publicState(u));
       }
 
+      case 'POST /api/push': {
+        const body = await readJson(req);
+        const sub = cleanSubscription(body.subscription);
+        if (!sub) throw new HttpError(400, 'This browser’s notification service is not supported.');
+        // A device belongs to whoever switched it on last: one browser never gets two people's alerts.
+        for (const other of Object.values(data.users)) other.pushSubs = other.pushSubs.filter((s) => s.id !== sub.id);
+        if (u.pushSubs.length >= 10) throw new HttpError(400, 'Ten devices is the limit. Remove one first.');
+        const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 40) : 'This device';
+        u.pushSubs.push({ ...sub, name, createdAt: now() });
+        store.save();
+        return reply(200, publicState(u));
+      }
+      case 'DELETE /api/push': {
+        const id = url.searchParams.get('id') || '';
+        u.pushSubs = u.pushSubs.filter((s) => s.id !== id);
+        store.save();
+        return reply(200, publicState(u));
+      }
+
       case 'POST /api/test-alert': {
-        if (!u.settings.ntfyUrl && !u.settings.discordWebhook) throw new HttpError(400, 'Add an ntfy topic or Discord webhook first.');
-        const errors = await send(u.settings, [{ title: 'Show Tracker', body: 'Test alert — delivery is working.', at: now() }]);
+        if (!u.settings.ntfyUrl && !u.settings.discordWebhook && !u.pushSubs.length) throw new HttpError(400, 'Turn on notifications on a device, or add an ntfy topic or Discord webhook first.');
+        const test = [{ title: 'Show Tracker', body: 'Test alert — delivery is working.', at: now() }];
+        const errors = [...(await send(u.settings, test)), ...(await pusher.send(u, test))];
         if (errors.length) throw new HttpError(502, errors.join('; '));
         return reply(200, { ok: true });
       }

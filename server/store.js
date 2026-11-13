@@ -41,6 +41,7 @@ export function makeUser(fields) {
     passkeys: [], // { id, name, publicKey, alg, signCount, transports, createdAt }
     recoveryCodes: [], // sha256 of each unused one-time code
     apiTokens: [], // { id, name, hash, createdAt, lastUsedAt } for the browser extension
+    pushSubs: [], // devices with notifications on: { id, name, endpoint, p256dh, auth, createdAt }
     extSeen: {}, // shows seen on a streaming site but not tracked: normalised title -> { title, provider, from, at, tried, show }
     shows: {}, // show key -> { addedAt }; the show itself lives in the shared catalog
     alerts: [],
@@ -157,6 +158,7 @@ export function openStore(dir, { dataKey = '' } = {}) {
     availability: {}, // show key -> { tmdbId, byRegion: { US: [service names] }, links, at }: where it streams
     dubs: {}, // anime show key -> [{ id, label, airsAt, dub: true, watchId }]: English dub episodes
     dubsAt: 0,
+    related: {}, // anime id -> { sequels, recs, at }: what follows it and what its viewers recommend, as fetched
     franchise: {}, // anime show key -> { root, offset, index, count, at }: its place among its seasons
     invites: {}, // sha256(token) -> { expiresAt }
     resets: {}, // sha256(token) -> { userId, expiresAt }

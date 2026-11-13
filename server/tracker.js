@@ -15,7 +15,7 @@ const MAX_TRACKED = 1000;
 export const REFRESH_EVERY = 30 * 60 * 1000;
 export const DISCOVER_EVERY = 12 * 60 * 60 * 1000;
 
-export function createTracker({ store, sources, send, sendFile = async () => {}, mailer = { enabled: false }, now = Date.now }) {
+export function createTracker({ store, sources, send, push = async () => [], sendFile = async () => {}, mailer = { enabled: false }, now = Date.now }) {
   const { data } = store;
   let refreshing = null;
   let lastAttempt = 0;
@@ -137,6 +137,8 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     const wanted = new Set(users().flatMap((u) => Object.keys(u.shows)));
     for (const key of Object.keys(data.catalog)) if (!wanted.has(key)) delete data.catalog[key];
     for (const key of Object.keys(data.franchise)) if (!wanted.has(key)) delete data.franchise[key];
+    // Related-show answers are kept a week past their last refresh, then forgotten.
+    for (const id of Object.keys(data.related)) if (now() - data.related[id].at > 7 * 24 * 60 * 60 * 1000) delete data.related[id];
     for (const key of Object.keys(data.availability)) if (!wanted.has(key)) delete data.availability[key];
     for (const key of Object.keys(data.dubs)) if (!wanted.has(key)) delete data.dubs[key];
   }
@@ -237,7 +239,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     for (const [key, entry] of todo) {
       entry.tried = true;
       try {
-        const found = await sources.searchAnime(entry.title);
+        const found = await sources.searchAnime(entry.title, { urgent: false });
         // Only an actual title match counts; a loosely related search hit would be a wrong suggestion.
         entry.show = found.find((s) => [s.title, s.altTitle].some((t) => sameSeries(normTitle(t), key))) || null;
       } catch (e) {
@@ -276,7 +278,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
   }
 
   async function sendNow(u, messages) {
-    const errors = await send(u.settings, messages);
+    const errors = [...(await send(u.settings, messages)), ...(await push(u, messages))];
     if (errors.length) {
       u.lastError = `Alert delivery failed — ${errors.join('; ')}`;
       store.save();
@@ -379,7 +381,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     // The very first run only records what already exists, so a new account does
     // not get an alert for every season already announced.
     silent ||= !u.discover;
-    const found = await computeDiscover({ shows: showsOf(u), sources, now: now() });
+    const found = await computeDiscover({ shows: showsOf(u), sources: { fetchRelated: relatedStored }, now: now() });
     const known = new Set(u.seenSequels);
     const news = found.sequels.filter((s) => s.fresh && !known.has(s.key));
     u.seenSequels = [...new Set([...u.seenSequels, ...found.sequels.map((s) => s.key)])].slice(-5000);
@@ -418,6 +420,34 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     }
   }
 
+  /**
+   * sources.fetchRelated, answered from what is already stored where that is
+   * recent enough. Sequel links and recommendations change slowly, so asking
+   * again for a whole list every time one show is added is what used to run
+   * into the source's request limit; now only shows not asked about lately
+   * are fetched.
+   */
+  async function relatedStored(ids, { recommendations = true } = {}) {
+    const KEEP = DISCOVER_EVERY - 60 * 60 * 1000;
+    const usable = (id) => data.related[id] && (!recommendations || data.related[id].recs);
+    const need = ids.filter((id) => !usable(id) || now() - data.related[id].at > KEEP);
+    if (need.length) {
+      try {
+        const got = await sources.fetchRelated(need, { recommendations });
+        for (const id of need) {
+          const g = got.get(id);
+          // An id the source no longer knows is remembered as having nothing, so it is not asked for every time.
+          data.related[id] = { sequels: g?.sequels || [], recs: recommendations ? g?.recs || [] : null, at: now() };
+        }
+        store.save();
+      } catch (e) {
+        // The source is unavailable: an older answer is better than none.
+        if (!need.every(usable)) throw e;
+      }
+    }
+    return new Map(ids.map((id) => [id, { sequels: data.related[id].sequels, recs: data.related[id].recs || [] }]));
+  }
+
   function refreshDiscover(u, { silent = false } = {}) {
     if (!discovering.has(u.id)) {
       discovering.set(
@@ -427,8 +457,13 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     }
     return discovering.get(u.id);
   }
+  /** Rebuild suggestions after the list changed. Changes made while a rebuild is running get one more afterwards. */
+  const discoverAgain = new Set();
   const discoverSoon = (u) => {
-    refreshDiscover(u, { silent: true }).catch((e) => console.error('Discover refresh failed:', e.message));
+    if (discovering.has(u.id)) return void discoverAgain.add(u.id);
+    refreshDiscover(u, { silent: true })
+      .catch((e) => console.error('Discover refresh failed:', e.message))
+      .finally(() => discoverAgain.delete(u.id) && data.users[u.id] && discoverSoon(u));
   };
 
   /** Re-fetch every catalog entry, then check everyone's alerts. */
@@ -470,14 +505,14 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
    * returns how many were new to them. Shows someone else already tracks are
    * reused from the catalog without another fetch.
    */
-  async function addMany(u, wanted, { discover = true } = {}) {
+  async function addMany(u, wanted, { discover = true, urgent = false } = {}) {
     const keyOf = (w) => `${w.source}:${w.id}`;
     // A ceiling per person keeps one account from swamping the schedule sources for everyone.
     const room = Math.max(0, MAX_TRACKED - Object.keys(u.shows).length);
     const missing = wanted.filter((w) => !u.shows[keyOf(w)]).slice(0, room);
     const toFetch = missing.filter((w) => !data.catalog[keyOf(w)]);
     const animeIds = toFetch.filter((w) => w.source === 'anilist').map((w) => w.id);
-    const fetched = animeIds.length ? await sources.fetchAnime(animeIds, now()) : [];
+    const fetched = animeIds.length ? await sources.fetchAnime(animeIds, now(), { urgent }) : [];
     for (const w of toFetch.filter((x) => x.source !== 'anilist')) {
       const show = await fetchSingle(w.source, w.id).catch(() => null);
       if (show) fetched.push(show);
@@ -551,6 +586,7 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
       : { title: 'Show Tracker: schedule updates are working again', body: 'Updates recovered.' };
     for (const u of admins()) {
       await send(u.settings, [{ ...message, at: now() }]).catch(() => {});
+      await push(u, [{ ...message, at: now() }]).catch(() => {});
       if (mailer.enabled && u.email) await mailer.send({ to: u.email, subject: message.title, text: `Hi ${u.username},\n\n${message.body}\n\nYou can switch these alerts off in the Admin tab.` }).catch(() => {});
     }
   }
@@ -641,7 +677,8 @@ export function createTracker({ store, sources, send, sendFile = async () => {},
     async addShow(u, source, id) {
       if (!['anilist', 'tvmaze', 'tmdb'].includes(source)) throw new Error('Show not found.');
       const key = `${source}:${id}`;
-      if (!u.shows[key] && !(await addMany(u, [{ source, id }]))) throw new Error('Show not found.');
+      // Someone is waiting for this one: it goes ahead of background lookups.
+      if (!u.shows[key] && !(await addMany(u, [{ source, id }], { urgent: true }))) throw new Error('Show not found.');
       return key;
     },
     removeShow(u, key) {

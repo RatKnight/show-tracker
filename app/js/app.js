@@ -3,7 +3,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], progress: {}, muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [] }, mail: false, movies: false, dubs: false };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], progress: {}, muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [], pushDevices: [] }, pushKey: '', mail: false, movies: false, dubs: false };
 const ui = {
   tab: 'upcoming',
   month: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -45,8 +45,10 @@ async function call(method, path, body) {
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new Error('Cannot reach the server.');
+    throw new Error(ui.offline ? 'You are offline. This needs a connection.' : 'Cannot reach the server.');
   }
+  // The service worker answers from its saved copy when the server cannot be reached.
+  ui.offline = res.headers.get('X-Offline') === '1';
   const json = await res.json().catch(() => null);
   if (res.status === 401 && ui.session?.authed) {
     ui.session = { setup: true, authed: false };
@@ -945,6 +947,8 @@ function viewSettings() {
         'div',
         { class: 'card' },
         h('p', { class: 'muted' }, 'The server checks schedules around the clock and sends an alert when an episode airs — nothing needs to be open.'),
+        pushSection(say),
+        h('h3', { class: 'sub-head' }, 'Other ways to get alerts'),
         h('label', { class: 'field', for: 'ntfy-url' }, 'ntfy topic address', ntfy),
         h('p', { class: 'muted small' }, 'Install the ntfy app, subscribe to a topic, and paste its address here. On ntfy.sh anyone who knows the topic name can read it, so pick a long random one.'),
         h('label', { class: 'field', for: 'discord-url' }, 'Discord webhook URL', discord),
@@ -976,7 +980,7 @@ function viewSettings() {
               onclick: () =>
                 saveChannels()
                   .then(() => call('POST', '/api/test-alert'))
-                  .then(() => say('Test alert sent — check your phone / Discord.'), (e) => say(e.message)),
+                  .then(() => say('Test alert sent — check your notifications, phone or Discord.'), (e) => say(e.message)),
             },
             'Save and send a test alert',
           ),
@@ -1137,6 +1141,110 @@ function viewSettings() {
 
 
 /** Your own account: name, e-mail, sharing, passkeys, password. */
+// ---------------------------------------------------------------- notifications on this device
+
+const canPush = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+/** The same short id the server gives a subscription, so this device can be picked out of the list. */
+async function pushId(endpoint) {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(new URL(endpoint).href));
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+}
+
+async function currentPush() {
+  if (!canPush()) return null;
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  return sub ? { sub, id: await pushId(sub.endpoint) } : null;
+}
+
+async function turnOnPush() {
+  if ((await Notification.requestPermission()) !== 'granted') throw new Error('Notifications were not allowed. You can change that in the browser’s settings for this site.');
+  const reg = await navigator.serviceWorker.ready;
+  // A subscription made for another server identity (after a restore, say) cannot be reused.
+  const old = await reg.pushManager.getSubscription();
+  if (old) await old.unsubscribe();
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: state.pushKey });
+  try {
+    await call('POST', '/api/push', { subscription: sub.toJSON(), name: deviceName() });
+  } catch (e) {
+    await sub.unsubscribe().catch(() => {});
+    throw e;
+  }
+  ui.pushHere = await pushId(sub.endpoint);
+}
+
+/** Stop notifications on this device: at the browser and on the server. */
+async function turnOffPush() {
+  const here = await currentPush().catch(() => null);
+  if (!here) return;
+  await call('DELETE', `/api/push?id=${here.id}`).catch(() => {});
+  await here.sub.unsubscribe().catch(() => {});
+  ui.pushHere = null;
+}
+
+/** A signed-out device gets no more of this account's alerts and keeps no copy of its list. */
+async function signOut() {
+  await turnOffPush().catch(() => {});
+  await caches?.delete('st-data-v1').catch(() => {});
+  await call('POST', '/api/logout').catch(() => {});
+  location.reload();
+}
+
+function pushSection(say) {
+  load('pushHere', async () => (ui.pushHere = (await currentPush())?.id || null));
+  const devices = state.me.pushDevices || [];
+  // Only counts if the server still knows this device too.
+  const here = devices.find((d) => d.id === ui.pushHere);
+  const run = (job, done) => async (e) => {
+    e.target.disabled = true;
+    try {
+      await job();
+      say(done);
+    } catch (err) {
+      say(err.message);
+    }
+    render();
+  };
+  const blocked = canPush() && Notification.permission === 'denied';
+  return h(
+    'div',
+    {},
+    h('h3', { class: 'sub-head' }, 'Notifications on this device'),
+    !canPush()
+      ? h('p', { class: 'muted small' }, 'This browser cannot show notifications from the site. On an iPhone or iPad, add Show Tracker to the Home Screen first and open it from there.')
+      : here
+        ? h('p', { class: 'muted small' }, 'On. Alerts appear as notifications on this device, even when Show Tracker is closed.')
+        : h('p', { class: 'muted small' }, blocked ? 'Notifications are blocked for this site. Allow them in the browser’s site settings, then come back here.' : 'Get alerts as ordinary notifications on this phone or computer. Nothing else to install.'),
+    canPush() &&
+      h(
+        'div',
+        { class: 'actions' },
+        here
+          ? h('button', { class: 'btn', type: 'button', onclick: run(turnOffPush, 'Notifications are off on this device.') }, 'Turn off on this device')
+          : h('button', { class: 'btn primary', type: 'button', disabled: blocked || ui.loading.pushHere === 'busy', onclick: run(turnOnPush, 'Notifications are on for this device.') }, 'Turn on notifications on this device'),
+      ),
+    devices.length > 0 &&
+      h(
+        'div',
+        { class: 'list' },
+        devices.map((d) =>
+          h(
+            'div',
+            { class: 'row' },
+            h('div', { class: 'body' }, h('div', { class: 'title' }, d.id === ui.pushHere ? `${d.name} (this device)` : d.name), h('div', { class: 'sub' }, `Turned on ${fmtShortDay.format(d.createdAt)}`)),
+            d.id !== ui.pushHere &&
+              h(
+                'div',
+                { class: 'side' },
+                h('button', { class: 'btn quiet', type: 'button', onclick: () => confirm(`Stop sending notifications to “${d.name}”?`) && act('DELETE', `/api/push?id=${encodeURIComponent(d.id)}`) }, 'Remove'),
+              ),
+          ),
+        ),
+      ),
+  );
+}
+
 function viewProfile() {
   const s = state.settings;
   return [
@@ -1428,10 +1536,7 @@ function viewProfile() {
               {
                 class: 'btn',
                 type: 'button',
-                onclick: async () => {
-                  await call('POST', '/api/logout').catch(() => {});
-                  location.reload();
-                },
+                onclick: signOut,
               },
               'Sign out',
             ),
@@ -2146,7 +2251,7 @@ function render() {
     ),
   );
 
-  const problem = ui.error || state.lastError;
+  const problem = ui.error || (ui.offline ? 'You are offline. This is the last saved copy of your schedule; changes need a connection.' : state.lastError);
   $('banner').hidden = !problem && !ui.info;
   $('banner').classList.toggle('good', !problem && Boolean(ui.info));
   $('banner').textContent = problem || ui.info || '';
@@ -2426,9 +2531,7 @@ profileMenu.addEventListener('click', async (e) => {
   if (!go) return;
   closeMenu();
   if (go === 'logout') {
-    await call('POST', '/api/logout').catch(() => {});
-    location.reload();
-    return;
+    return signOut();
   }
   if (go === 'tour') return startTour();
   setTab(go);
@@ -2459,6 +2562,8 @@ async function adoptTimeZone() {
 
 async function boot() {
   render();
+  // Notifications and offline use. Not on plain http (other than localhost), where browsers do not allow it.
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   const hash = /^#(invite|reset|share|confirm)=([\w-]{8,})$/.exec(location.hash);
   try {
     if (hash?.[1] === 'share') {

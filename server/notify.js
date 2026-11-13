@@ -75,7 +75,7 @@ export function isPrivateAddress(ip) {
  * so the address that is checked is the address that is connected to: a host
  * name cannot answer "public" for the check and "internal" a moment later.
  */
-function publicLookup(hostname, options, callback) {
+export function publicLookup(hostname, options, callback) {
   lookup(hostname, options, (err, address, family) => {
     if (err) return callback(err);
     const all = Array.isArray(address) ? address : [{ address, family }];
