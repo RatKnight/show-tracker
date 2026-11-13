@@ -65,11 +65,10 @@ async function call(method, path, body) {
     throw err;
   }
   if (json && json.shows) {
-    // The list changed, so suggestions built from it are stale.
-    if (Object.keys(json.shows).length !== Object.keys(state.shows).length) {
-      ui.discover = null;
-      delete ui.loading.discover;
-    }
+    // The list changed, so suggestions built from it are stale. They are fetched again the
+    // next time Discover is opened, not now: reloading the page under someone who is
+    // working down it would move everything and lose their place.
+    if (Object.keys(json.shows).length !== Object.keys(state.shows).length) ui.discoverStale = true;
     state = json;
   }
   return json;
@@ -508,6 +507,8 @@ function viewDiscover() {
         } catch (err) {
           ui.error = err.message;
         }
+        // The whole section is done with: this one does reload the suggestions.
+        freshDiscover();
         render();
       };
       out.push(
@@ -2462,7 +2463,14 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+/** Fetch suggestions again, keeping the current ones on screen until the new ones arrive. */
+function freshDiscover() {
+  ui.discoverStale = false;
+  delete ui.loading.discover;
+}
+
 function setTab(id) {
+  if (id === 'discover' && ui.tab !== 'discover' && ui.discoverStale) freshDiscover();
   // Leaving the alerts tab marks what you saw there as read.
   if (ui.tab === 'alerts' && id !== 'alerts' && state.alerts.some((a) => !a.read)) {
     for (const a of state.alerts) a.read = true;
