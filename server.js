@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { SERVICES, animeSeason } from './app/js/core.js';
 import { openStore, makeUser } from './server/store.js';
 import { createPusher, cleanSubscription } from './server/push.js';
-import { createTracker } from './server/tracker.js';
+import { createTracker, SHELF_FRESH } from './server/tracker.js';
 import {
   hashPassword,
   checkPassword,
@@ -82,7 +82,7 @@ async function readJson(req, limit = 64 * 1024) {
   throw new HttpError(400, 'Invalid JSON.');
 }
 
-export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, pushPost, sendFile = sendDiscordFile, mailer = createMailer(), publicUrl = '', trustProxy = false, now = Date.now } = {}) {
+export function createApp({ dataDir, dataKey = '', sources = liveSources, send = sendAlerts, pushPost, pause = (ms) => new Promise((r) => setTimeout(r, ms)), sendFile = sendDiscordFile, mailer = createMailer(), publicUrl = '', trustProxy = false, now = Date.now } = {}) {
   const store = openStore(dataDir, { dataKey });
   const { data } = store;
   // Push services want a contact for whoever sends: the site's own address.
@@ -299,6 +299,112 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     }
     return data.lists[name].value;
   }
+  // ---- lists the Discover pages are built from, each with how long an answer is good for
+  const HOUR = 60 * 60 * 1000;
+  const seasonList = (offset, maxAge = 6 * HOUR) => {
+    const { season, year } = animeSeason(new Date(now()), offset);
+    return storedList(`season:${season}-${year}`, maxAge, () => sources.fetchSeason(season, year, now())).then((list) => ({ season, year, list }));
+  };
+  const premiereList = (region, maxAge = 12 * HOUR) => storedList(`premieres:${region}`, maxAge, () => sources.fetchPremieres(region, now()));
+  const trendingList = (maxAge = 12 * HOUR) => storedList('trending', maxAge, () => sources.fetchTrending());
+  const similarList = (m, maxAge = 6 * 24 * HOUR) => storedList(`similar:${m.kind}:${m.tmdbId}`, maxAge, () => sources.fetchSimilar(m.kind, m.tmdbId));
+  /** The series and films someone tracks, as TMDB knows them. */
+  const tmdbTitles = (u) =>
+    tracker
+      .showsOf(u)
+      .map((s) => (s.source === 'tmdb' ? { kind: 'movie', tmdbId: s.id, title: s.title } : s.source === 'tvmaze' && data.availability[s.key]?.tmdbId ? { kind: 'tv', tmdbId: data.availability[s.key].tmdbId, title: s.title } : null))
+      .filter(Boolean);
+
+  /**
+   * Background work, every few minutes: fetch ahead of time what the Discover
+   * pages will ask for, so nobody waits on an outside source and a show can be
+   * tracked without a request. The limits here are the sources' (how often they
+   * may be asked), which is why everything is paced and done a slice at a time.
+   */
+  let warming = false;
+  async function warm() {
+    if (warming) return;
+    warming = true;
+    const stage = async (name, work) => {
+      try {
+        await work();
+      } catch (e) {
+        console.error(`Fetching ahead (${name}) failed:`, e.message);
+      }
+    };
+    try {
+      const people = Object.values(data.users);
+      if (!people.length) return;
+      const ahead = new Map(); // show key -> { source, id } worth having ready
+
+      // Lists are refreshed a while before they would go stale, so a visit never triggers the fetch.
+      await stage('seasons', async () => {
+        for (const offset of [0, 1]) for (const s of (await seasonList(offset, 4 * HOUR)).list) ahead.set(s.key, s);
+      });
+      await stage('premieres', async () => {
+        for (const region of new Set(people.map((u) => u.settings.region || 'US'))) for (const s of await premiereList(region, 9 * HOUR)) ahead.set(s.key, s);
+      });
+      for (const u of people) for (const s of [...(u.discover?.sequels || []), ...(u.discover?.recs || [])]) ahead.set(s.key, s);
+
+      if (movies()) {
+        const series = new Map();
+        await stage('popular', async () => {
+          const trending = await trendingList(9 * HOUR);
+          for (const s of trending.movies) ahead.set(s.key, s);
+          for (const s of trending.tv) series.set(s.id, s);
+        });
+        await stage('suggestions', async () => {
+          const titles = new Map(people.flatMap(tmdbTitles).map((m) => [`${m.kind}:${m.tmdbId}`, m]));
+          for (const m of titles.values()) {
+            const had = data.lists[`similar:${m.kind}:${m.tmdbId}`]?.at;
+            const list = await similarList(m, 5 * 24 * HOUR);
+            if (data.lists[`similar:${m.kind}:${m.tmdbId}`]?.at !== had) await pause(250);
+            for (const s of list) s.source === 'tmdb' ? ahead.set(s.key, s) : series.set(s.id, s);
+          }
+        });
+        // Find each listed series on TVmaze now, so Track is instant and ones without a schedule are not offered.
+        await stage('series lookup', async () => {
+          let done = 0;
+          for (const id of series.keys()) {
+            if (id in data.tvIds) continue;
+            if (++done > 40) break;
+            data.tvIds[id] = await sources.resolveTv(id);
+            await pause(600);
+          }
+          if (done) store.save();
+          for (const id of series.keys()) if (data.tvIds[id]) ahead.set(`tvmaze:${data.tvIds[id]}`, { source: 'tvmaze', id: data.tvIds[id] });
+        });
+      }
+
+      // Schedules for those shows, a slice per run; refreshed before they are too old to use as they are.
+      const due = [...ahead.entries()].filter(([key]) => !data.catalog[key] && !(now() - (data.shelf[key]?.at || 0) < SHELF_FRESH * 0.75)).map(([, s]) => s);
+      const shelve = (show) => show && (data.shelf[show.key] = { show, at: now() });
+      await stage('anime schedules', async () => {
+        const ids = due.filter((s) => s.source === 'anilist').map((s) => s.id).slice(0, 200);
+        if (ids.length) (await sources.fetchAnime(ids, now())).forEach(shelve);
+      });
+      await stage('series schedules', async () => {
+        for (const s of due.filter((x) => x.source === 'tvmaze').slice(0, 30)) {
+          shelve(await sources.fetchTv(s.id, now()));
+          await pause(600);
+        }
+      });
+      if (movies()) {
+        await stage('film details', async () => {
+          for (const s of due.filter((x) => x.source === 'tmdb').slice(0, 40)) {
+            shelve(await sources.fetchMovie(s.id, now()));
+            await pause(150);
+          }
+        });
+      }
+      // What is no longer on any page, or has since been tracked, is let go after three days.
+      for (const key of Object.keys(data.shelf)) if (data.catalog[key] || now() - data.shelf[key].at > 72 * HOUR) delete data.shelf[key];
+      store.save();
+    } finally {
+      warming = false;
+    }
+  }
+
   // Search answers are kept for an hour, in memory only: what people look for is not written down.
   const searches = new Map();
   async function search(kind, q) {
@@ -845,23 +951,19 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
       case 'GET /api/popular': {
         if (!movies()) throw new HttpError(400, 'Movies are not set up on this site.');
-        const HALF_DAY = 12 * 60 * 60 * 1000;
-        const trending = await storedList('trending', HALF_DAY, () => sources.fetchTrending());
-        // Series and films this person tracks, as TMDB knows them.
-        const mine = tracker
-          .showsOf(u)
-          .map((s) => (s.source === 'tmdb' ? { kind: 'movie', tmdbId: s.id, title: s.title } : s.source === 'tvmaze' && data.availability[s.key]?.tmdbId ? { kind: 'tv', tmdbId: data.availability[s.key].tmdbId, title: s.title } : null))
-          .filter(Boolean);
+        const trending = await trendingList();
+        const mine = tmdbTitles(u);
         const trackedTv = new Set(mine.filter((m) => m.kind === 'tv').map((m) => m.tmdbId));
-        const hidden = (x) => u.dismissed.includes(x.key) || (x.source === 'tmdb' ? Boolean(u.shows[x.key]) : trackedTv.has(x.id) || Boolean(u.shows[`tvmaze:${data.tvIds[x.id]}`]));
+        // (A series already looked up and found to have no episode schedule is not offered.)
+        const hidden = (x) => u.dismissed.includes(x.key) || (x.source === 'tmdb' ? Boolean(u.shows[x.key]) : trackedTv.has(x.id) || data.tvIds[x.id] === null || Boolean(u.shows[`tvmaze:${data.tvIds[x.id]}`]));
         // "People who watched X also liked": each tracked title votes, as for anime. A few
         // new lookups per visit; the answers are stored for a week.
         const votes = new Map();
         let lookups = 0;
         for (const m of mine) {
-          const name = `similar:${m.kind}:${m.tmdbId}`;
-          if (!data.lists[name] && ++lookups > 6) continue;
-          const list = await storedList(name, 6 * 24 * 60 * 60 * 1000, () => sources.fetchSimilar(m.kind, m.tmdbId)).catch(() => []);
+          // Normally fetched ahead in the background; a title tracked moments ago is looked up here.
+          if (!data.lists[`similar:${m.kind}:${m.tmdbId}`] && ++lookups > 6) continue;
+          const list = await similarList(m).catch(() => []);
           list.forEach((x, i) => {
             const v = votes.get(x.key) || { show: x, score: 0, because: [] };
             v.score += Math.max(1, 10 - i);
@@ -879,7 +981,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
       case 'GET /api/premieres': {
         const region = u.settings.region || 'US';
-        return reply(200, { region, list: await storedList(`premieres:${region}`, 12 * 60 * 60 * 1000, () => sources.fetchPremieres(region, now())) });
+        return reply(200, { region, list: await premiereList(region) });
       }
 
       case 'GET /api/cinema': {
@@ -889,9 +991,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       }
 
       case 'GET /api/season': {
-        const { season, year } = animeSeason(new Date(now()), url.searchParams.get('which') === 'next' ? 1 : 0);
-        const id = `${season}-${year}`;
-        return reply(200, { season, year, list: await storedList(`season:${id}`, 6 * 60 * 60 * 1000, () => sources.fetchSeason(season, year, now())) });
+        return reply(200, await seasonList(url.searchParams.get('which') === 'next' ? 1 : 0));
       }
 
       case 'PUT /api/account': {
@@ -1102,7 +1202,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       res.destroy();
     });
 
-  return { server: createServer(handle), tracker, store, setupCode };
+  return { server: createServer(handle), tracker, store, setupCode, warm };
 }
 
 // Run directly: `node server.js`
@@ -1110,7 +1210,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
   const dataKey = process.env.DATA_KEY || '';
   const mailer = createMailer({ apiKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM, publicUrl: process.env.PUBLIC_URL });
-  const { server, tracker, store, setupCode } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer, publicUrl: process.env.PUBLIC_URL, trustProxy: process.env.TRUST_PROXY === '1' });
+  const { server, tracker, store, setupCode, warm } = createApp({ dataDir: process.env.DATA_DIR || join(process.cwd(), 'data'), dataKey, mailer, publicUrl: process.env.PUBLIC_URL, trustProxy: process.env.TRUST_PROXY === '1' });
   console.log(process.env.TRUST_PROXY === '1' ? 'Trusting the reverse proxy for visitor addresses and HTTPS.' : 'WARNING: TRUST_PROXY is not set. Behind a reverse proxy, set TRUST_PROXY=1 or sign-in cookies will not be marked Secure and attempt limits will not tell visitors apart.');
   console.log(process.env.TMDB_API_KEY ? 'Movies are on.' : 'Movies are off (needs TMDB_API_KEY).');
   console.log(process.env.ANIMESCHEDULE_TOKEN ? 'Dub dates are on.' : 'Dub dates are off (needs ANIMESCHEDULE_TOKEN).');
@@ -1134,6 +1234,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const tick = () => tracker.tick().catch((e) => console.error('Background check failed:', e.message));
   tick();
   setInterval(tick, 60 * 1000);
+  // Fetch ahead for the Discover pages: shortly after start, then every ten minutes.
+  const ahead = () => warm().catch((e) => console.error('Fetching ahead failed:', e.message));
+  setTimeout(ahead, 45 * 1000);
+  setInterval(ahead, 10 * 60 * 1000);
   // No host given: Node listens on IPv6 and IPv4 where IPv6 exists and on IPv4
   // alone otherwise, so health checks against `localhost` work either way.
   server.listen(port, () => console.log(`Show Tracker listening on port ${port}`));

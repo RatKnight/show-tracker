@@ -1849,7 +1849,7 @@ test('http: search covers every category by default; TV and film suggestions; a 
 
   // Tracked titles leave the lists; the film now feeds suggestions, asked for once.
   popular = (await ann.req('GET', '/api/popular')).body;
-  assert.deepEqual(popular.tv.map((x) => x.title), ['Other Series']);
+  assert.deepEqual(popular.tv.map((x) => x.title), [], 'the tracked one is gone, and so is the one now known to have no schedule');
   assert.deepEqual(popular.movies.map((x) => x.key), ['tmdb:301']);
   assert.deepEqual(popular.recs.map((x) => [x.key, x.because]), [['tmdb:310', ['Film 300']]]);
   await ann.req('GET', '/api/popular');
@@ -1865,4 +1865,40 @@ test('http: search covers every category by default; TV and film suggestions; a 
   assert.equal((await ann.req('GET', '/api/state')).body.settings.seenChanges, '');
   assert.equal((await ann.req('PUT', '/api/settings', { seenChanges: '2026-11-13' })).body.settings.seenChanges, '2026-11-13');
   assert.equal((await ann.req('PUT', '/api/settings', { seenChanges: '<script>' })).body.settings.seenChanges, '2026-11-13');
+});
+
+test('fetching ahead: Discover lists are ready before anyone asks, and tracking a listed show needs no request', async (t) => {
+  const app = await serve(t, { pause: async () => {} });
+  const { sources, store, client } = app;
+  const ann = client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: app.setupCode });
+  const at = { t: Date.now() };
+  const series = (id, title) => ({ key: `tmdbtv:${id}`, source: 'tmdbtv', id, kind: 'TV', title, streams: [], episodes: [] });
+  sources.fetchTrending = async () => ({ tv: [series(1, 'Has a schedule'), series(2, 'Has none')], movies: [fakeMovie(300, at)] });
+  sources.fetchSimilar = async () => [fakeMovie(310, at)];
+  sources.resolveTv = async (id) => (id === 1 ? 77 : null);
+  sources.fetchTv = async (id) => ({ ...fakeShow(id, at), key: `tvmaze:${id}`, source: 'tvmaze' });
+  sources.related.set(5, { sequels: [], recs: [{ rating: 9, media: media(60, 'Suggested anime') }] });
+  await ann.req('POST', '/api/shows', { source: 'anilist', id: 5 });
+  await ann.req('POST', '/api/shows', { source: 'tmdb', id: 301 });
+  await app.tracker.refreshDiscover(Object.values(store.data.users)[0], { silent: true });
+
+  await app.warm();
+  assert.deepEqual(store.data.tvIds, { 1: 77, 2: null });
+  for (const key of ['anilist:60', 'anilist:900', 'tvmaze:77', 'tvmaze:800', 'tmdb:300', 'tmdb:310']) assert.ok(store.data.shelf[key], `${key} is ready`);
+  assert.equal(store.data.shelf['tmdb:301'], undefined, 'not for shows already tracked');
+
+  // From here on the sources are unreachable: every page still opens, and listed shows can be tracked.
+  for (const name of ['fetchAnime', 'fetchTv', 'fetchMovie', 'fetchSeason', 'fetchPremieres', 'fetchTrending', 'fetchSimilar', 'resolveTv']) sources[name] = async () => Promise.reject(new Error(`${name} must not be called`));
+  assert.equal((await ann.req('GET', '/api/season?which=next')).body.list.length, 1);
+  assert.equal((await ann.req('GET', '/api/premieres')).body.list.length, 1);
+  const popular = (await ann.req('GET', '/api/popular')).body;
+  assert.deepEqual(popular.tv.map((x) => x.title), ['Has a schedule'], 'a series without a schedule is not offered');
+  assert.deepEqual(popular.recs.map((x) => x.key), ['tmdb:310']);
+  for (const [source, id] of [['anilist', 60], ['tmdbtv', 1], ['tmdb', 300], ['tvmaze', 800]]) assert.equal((await ann.req('POST', '/api/shows', { source, id })).status, 200, `${source}:${id}`);
+  assert.deepEqual(Object.keys((await ann.req('GET', '/api/state')).body.shows).sort(), ['anilist:5', 'anilist:60', 'tmdb:300', 'tmdb:301', 'tvmaze:77', 'tvmaze:800']);
+  // Tracked shows leave the shelf; a second run with nothing due asks for nothing.
+  await app.warm();
+  assert.equal(store.data.shelf['anilist:60'], undefined);
+  assert.ok(store.data.shelf['tmdb:310']);
 });
