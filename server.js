@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { SERVICES, animeSeason } from './app/js/core.js';
 import { openStore, makeUser } from './server/store.js';
 import { createPusher, cleanSubscription } from './server/push.js';
+import { languageOf, say } from './server/i18n.js';
 import { createTracker, SHELF_FRESH } from './server/tracker.js';
 import {
   hashPassword,
@@ -634,8 +635,8 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         data.resets[tokenHash(token)] = { userId: user.id, expiresAt: now() + 30 * 60 * 1000 };
         sendMail({
           to: user.email,
-          subject: 'Reset your Show Tracker password',
-          text: `Hi ${user.username},\n\nSomeone asked to reset the password for your Show Tracker account. To choose a new one, open this link within 30 minutes:\n\n${mailer.link('reset', token)}\n\nIf that was not you, ignore this message; your password stays as it is.`,
+          subject: say(languageOf(user), 'Reset your Show Tracker password'),
+          text: [say(languageOf(user), 'Hi {name},', { name: user.username }), say(languageOf(user), 'Someone asked to reset the password for your Show Tracker account. To choose a new one, open this link within 30 minutes:'), mailer.link('reset', token), say(languageOf(user), 'If that was not you, ignore this message; your password stays as it is.')].join('\n\n'),
         });
       }
       if (matches.length) store.save();
@@ -843,6 +844,8 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           autoTrackSeasons: typeof body.autoTrackSeasons === 'boolean' ? body.autoTrackSeasons : cur.autoTrackSeasons,
           cinemaAlerts: typeof body.cinemaAlerts === 'boolean' ? body.cinemaAlerts : cur.cinemaAlerts,
           tourDone: typeof body.tourDone === 'boolean' ? body.tourDone : Boolean(cur.tourDone),
+          // What the browser is actually showing, reported by the app: the language to write to someone who left the choice to it.
+          uiLanguage: typeof body.uiLanguage === 'string' && /^[a-z]{2}$/.test(body.uiLanguage) ? body.uiLanguage : cur.uiLanguage || '',
           language: typeof body.language === 'string' && /^([a-z]{2})?$/.test(body.language) ? body.language : cur.language || '',
           seenChanges: typeof body.seenChanges === 'string' && /^[\w.-]{1,20}$/.test(body.seenChanges) ? body.seenChanges : cur.seenChanges || '',
         };
@@ -1087,8 +1090,8 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         store.save();
         await mailer.send({
           to: address,
-          subject: 'Confirm your e-mail for Show Tracker',
-          text: `Hi ${u.username},\n\nTo use this address for password recovery on Show Tracker, open this link within 24 hours:\n\n${mailer.link('confirm', token)}\n\nIf you did not ask for this, ignore this message.`,
+          subject: say(languageOf(u), 'Confirm your e-mail for Show Tracker'),
+          text: [say(languageOf(u), 'Hi {name},', { name: u.username }), say(languageOf(u), 'To use this address for password recovery on Show Tracker, open this link within 24 hours:'), mailer.link('confirm', token), say(languageOf(u), 'If you did not ask for this, ignore this message.')].join('\n\n'),
         }).catch((e) => {
           throw new HttpError(502, `Could not send the confirmation e-mail: ${e.message}`);
         });
@@ -1147,7 +1150,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
       case 'POST /api/test-alert': {
         if (!u.settings.ntfyUrl && !u.settings.discordWebhook && !u.pushSubs.length) throw new HttpError(400, 'Turn on notifications on a device, or add an ntfy topic or Discord webhook first.');
-        const test = [{ title: 'Show Tracker', body: 'Test alert — delivery is working.', at: now() }];
+        const test = [{ title: 'Show Tracker', body: say(languageOf(u), 'Test alert — delivery is working.'), at: now() }];
         const errors = [...(await send(u.settings, test)), ...(await pusher.send(u, test))];
         if (errors.length) throw new HttpError(502, errors.join('; '));
         return reply(200, { ok: true });

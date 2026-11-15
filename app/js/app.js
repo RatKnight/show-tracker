@@ -1987,6 +1987,8 @@ async function enterApp() {
   // Signed in somewhere new: switch to the language chosen for this account.
   const wanted = state.settings.language;
   if (wanted && wanted !== LANG && Object.hasOwn(LANGUAGES, wanted) && rememberLanguage(wanted)) return location.reload();
+  // Alerts and e-mails are written by the server: tell it which language this person reads.
+  if (state.settings.uiLanguage !== LANG) await call('PUT', '/api/settings', { uiLanguage: LANG }).catch(() => {});
   await adoptTimeZone();
   let skipped = false;
   try {

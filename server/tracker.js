@@ -6,6 +6,7 @@
 import { collectAlerts, myStreams, serviceId, PAST_WINDOW } from '../app/js/core.js';
 import { computeDiscover, buildSeries, withFranchiseRoots } from './discover.js';
 import { localClock, inQuietHours, summarize } from './timing.js';
+import { languageOf, say, sayLabel } from './i18n.js';
 import { readFileSync } from 'node:fs';
 import { buildBackup, writeSnapshot } from './backup.js';
 import { matchEpisode, normTitle, sameSeries } from './extmatch.js';
@@ -265,11 +266,12 @@ export function createTracker({ store, sources, send, push = async () => [], sen
   const seenPending = (u) => Object.values(u.extSeen).filter((e) => !e.tried).length;
 
   /** What to say when something comes out: an episode, or a movie's release event. */
-  const releaseText = (ep, where) => {
-    if (ep.event === 'cinema') return ep.label.includes('limited') ? 'Opens in select US cinemas today' : 'Opens in US cinemas today';
-    if (ep.event === 'digital') return `Out digitally today${where ? ` — on ${where}` : ''}`;
-    if (ep.event === 'release') return 'Released today';
-    return `${ep.label}${ep.name && ep.name !== ep.label ? ` “${ep.name}”` : ''} is out${where ? ` on ${where}` : ''}`;
+  const releaseText = (ep, where, lang = 'en') => {
+    if (ep.event === 'cinema') return say(lang, ep.label.includes('limited') ? 'Opens in select US cinemas today' : 'Opens in US cinemas today');
+    if (ep.event === 'digital') return where ? say(lang, 'Out digitally today — on {where}', { where }) : say(lang, 'Out digitally today');
+    if (ep.event === 'release') return say(lang, 'Released today');
+    const label = `${sayLabel(lang, ep.label)}${ep.name && ep.name !== ep.label ? ` “${ep.name}”` : ''}`;
+    return where ? say(lang, '{label} is out on {where}', { label, where }) : say(lang, '{label} is out', { label });
   };
 
   const snapshotOf = (show) => ({ key: show.key, title: show.title, image: show.image, url: show.url, streams: show.streams, kind: show.kind });
@@ -311,7 +313,7 @@ export function createTracker({ store, sources, send, push = async () => [], sen
     if (!u.outbox.length) return;
     const batch = u.outbox.splice(0);
     store.save();
-    await sendNow(u, batch.length > 1 && (digest || batch.length > 5) ? [summarize(batch)] : batch);
+    await sendNow(u, batch.length > 1 && (digest || batch.length > 5) ? [summarize(batch, languageOf(u))] : batch);
   }
 
   async function checkAlerts(u) {
@@ -332,7 +334,7 @@ export function createTracker({ store, sources, send, push = async () => [], sen
         const where = mine.map((s) => s.name).join(', ');
         return {
           title: show.title,
-          body: releaseText(ep, where),
+          body: releaseText(ep, where, languageOf(u)),
           url: mine[0]?.url || show.url,
           image: show.image,
           at: ep.airsAt,
@@ -367,7 +369,7 @@ export function createTracker({ store, sources, send, push = async () => [], sen
       u,
       due.map(({ show, ep }) => ({
         title: show.title,
-        body: `${ep.label} airs in ${Math.max(1, Math.round((ep.airsAt - now()) / 60000))} minutes`,
+        body: say(languageOf(u), '{label} airs in {n} minutes', { label: sayLabel(languageOf(u), ep.label), n: Math.max(1, Math.round((ep.airsAt - now()) / 60000)) }),
         url: show.url,
         image: show.image,
         at: ep.airsAt,
@@ -412,7 +414,7 @@ export function createTracker({ store, sources, send, push = async () => [], sen
         u,
         news.map((s) => ({
           title: s.title,
-          body: `New season of ${s.from} ${s.status === 'Airing' ? 'is airing' : 'announced'}${s.note ? ` — ${s.note.toLowerCase()}` : ''}${adopted.has(s.key) ? '. Added to your list.' : ''}`,
+          body: `${say(languageOf(u), s.status === 'Airing' ? 'New season of {from} is airing' : 'New season of {from} announced', { from: s.from })}${s.note ? ` — ${s.note.toLowerCase()}` : ''}${adopted.has(s.key) ? `. ${say(languageOf(u), 'Added to your list.')}` : ''}`,
           url: s.url,
           image: s.image,
           at: now(),
@@ -629,7 +631,7 @@ export function createTracker({ store, sources, send, push = async () => [], sen
   async function refreshCinema() {
     if (!sources.hasMovies?.()) return cinema;
     cinema = { list: await sources.fetchCinemaAnime(now()), updatedAt: now() };
-    const day = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    const dayIn = (lang) => new Intl.DateTimeFormat(lang === 'en' ? 'en-US' : lang, { month: 'short', day: 'numeric', timeZone: 'UTC' });
     for (const u of users()) {
       const known = new Set(u.seenCinema || []);
       const first = !u.seenCinema; // a new account is not told about everything already listed
@@ -643,7 +645,7 @@ export function createTracker({ store, sources, send, push = async () => [], sen
         u,
         fresh.map((m) => ({
           title: m.title,
-          body: `Anime film coming to US cinemas on ${day.format(m.episodes.find((e) => e.event === 'cinema').airsAt)}`,
+          body: say(languageOf(u), 'Anime film coming to US cinemas on {date}', { date: dayIn(languageOf(u)).format(m.episodes.find((e) => e.event === 'cinema').airsAt) }),
           url: m.tickets || m.url,
           image: m.image,
           at: now(),
