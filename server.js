@@ -843,6 +843,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           autoTrackSeasons: typeof body.autoTrackSeasons === 'boolean' ? body.autoTrackSeasons : cur.autoTrackSeasons,
           cinemaAlerts: typeof body.cinemaAlerts === 'boolean' ? body.cinemaAlerts : cur.cinemaAlerts,
           tourDone: typeof body.tourDone === 'boolean' ? body.tourDone : Boolean(cur.tourDone),
+          language: typeof body.language === 'string' && /^([a-z]{2})?$/.test(body.language) ? body.language : cur.language || '',
           seenChanges: typeof body.seenChanges === 'string' && /^[\w.-]{1,20}$/.test(body.seenChanges) ? body.seenChanges : cur.seenChanges || '',
         };
         const problem = validateChannels(next);

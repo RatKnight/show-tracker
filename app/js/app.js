@@ -1,4 +1,5 @@
 import { CHANGES } from './changes.js';
+import { LANG, LANGUAGES, LOCALE, T, tn, tr, translatePage } from './i18n.js';
 import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGrid, formatCountdown, isWatched, watchState } from './core.js';
 
 // ---------------------------------------------------------------- state
@@ -63,7 +64,7 @@ async function call(method, path, body) {
     delete ui.loading.adminGate;
   }
   if (!res.ok) {
-    const err = new Error(json?.error || `Request failed (${res.status})`);
+    const err = new Error(tr(json?.error) || T`Request failed (${res.status})`);
     err.body = json;
     throw err;
   }
@@ -96,7 +97,7 @@ const SAVES = ['/api/settings', '/api/share', '/api/shows/mute', '/api/admin/sit
 /** A brief note in the bottom-right corner. */
 function toast(message) {
   const el = document.getElementById('toast');
-  el.textContent = message;
+  el.textContent = tr(message);
   el.hidden = false;
   // Restart the fade when several changes come in a row.
   el.classList.remove('show');
@@ -111,17 +112,22 @@ function toast(message) {
 
 // ---------------------------------------------------------------- dom helpers
 
+const SPOKEN = new Set(['title', 'placeholder', 'aria-label', 'alt']);
+/** ask(), in the person's language. */
+const ask = (question) => confirm(tr(question));
+
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
     if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (k === 'class') el.className = v;
-    else el.setAttribute(k, v === true ? '' : v);
+    // Text a person reads or hears is shown in their language; everything else is set as given.
+    else el.setAttribute(k, v === true ? '' : SPOKEN.has(k) ? tr(v) : v);
   }
   for (const kid of kids.flat(Infinity)) {
     if (kid == null || kid === false) continue;
-    el.append(kid.nodeType ? kid : String(kid));
+    el.append(kid.nodeType ? kid : tr(String(kid)));
   }
   return el;
 }
@@ -134,11 +140,11 @@ function link(url, text, cls) {
   return href ? h('a', { href, target: '_blank', rel: 'noopener noreferrer', class: cls }, text) : h('span', { class: cls }, text);
 }
 
-const fmtTime = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
-const fmtDay = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
-const fmtShortDay = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
-const fmtMonth = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' });
-const fmtDow = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
+const fmtTime = new Intl.DateTimeFormat(LOCALE, { hour: 'numeric', minute: '2-digit' });
+const fmtDay = new Intl.DateTimeFormat(LOCALE, { weekday: 'long', month: 'short', day: 'numeric' });
+const fmtShortDay = new Intl.DateTimeFormat(LOCALE, { weekday: 'short', month: 'short', day: 'numeric' });
+const fmtMonth = new Intl.DateTimeFormat(LOCALE, { month: 'long', year: 'numeric' });
+const fmtDow = new Intl.DateTimeFormat(LOCALE, { weekday: 'short' });
 
 const timeOf = (ep) => (ep.dateOnly ? 'All day' : fmtTime.format(ep.airsAt));
 
@@ -168,7 +174,7 @@ const REGION_CODES =
 const REGIONS = (() => {
   let names = null;
   try {
-    names = new Intl.DisplayNames(undefined, { type: 'region' });
+    names = new Intl.DisplayNames(LOCALE, { type: 'region' });
   } catch {
     /* very old browser: fall back to the codes */
   }
@@ -278,7 +284,7 @@ function viewUpcoming() {
       h(
         'div',
         { class: 'section-head' },
-        h('h2', {}, toWatch.length ? `Aired recently · ${toWatch.length} to watch` : 'Aired recently'),
+        h('h2', {}, toWatch.length ? T`Aired recently · ${toWatch.length} to watch` : 'Aired recently'),
         toWatch.length > 1 && h('button', { class: 'btn', type: 'button', onclick: () => act('POST', '/api/watched', { ids: [...new Set(toWatch.map((x) => x.ep.watchId || x.ep.id))] }) }, 'Mark all watched'),
       ),
       h('div', { class: 'list' }, recent.map((i) => episodeRow(i, { showDate: true, watch: true, unread: toWatch.includes(i) }))),
@@ -345,7 +351,7 @@ function viewCalendar() {
         {
           class: cls,
           type: 'button',
-          'aria-label': `${fmtDay.format(d)}, ${items.length} episode${items.length === 1 ? '' : 's'}`,
+          'aria-label': `${fmtDay.format(d)}, ${tn(items.length, '{0} episode', '{0} episodes')}`,
           onclick: () => {
             ui.selectedDay = k;
             render();
@@ -356,7 +362,7 @@ function viewCalendar() {
           const svc = myStreams(show, state.settings.services)[0]?.id || (show.streams.length ? 'none' : '');
           return h('span', { class: `chip ${svc}${ep.airsAt <= now ? ' past' : ''}`, title: `${show.title} — ${ep.label} (${timeOf(ep)})` }, show.title);
         }),
-        items.length > 3 && h('span', { class: 'more' }, `+${items.length - 3} more`),
+        items.length > 3 && h('span', { class: 'more' }, T`+${items.length - 3} more`),
       ),
     );
   }
@@ -382,7 +388,7 @@ function load(name, fetcher) {
   ui.loading[name] = 'busy';
   fetcher().then(
     () => (ui.loading[name] = 'done'),
-    (e) => (ui.loading[name] = `Could not load this: ${e.message}`),
+    (e) => (ui.loading[name] = T`Could not load this: ${e.message}`),
   ).then(render);
 }
 
@@ -395,7 +401,7 @@ function showCard(show, { reason, dismissable } = {}) {
   const add = h('button', { class: `btn${tracked ? '' : ' primary'}`, type: 'button', disabled: tracked }, tracked ? 'Tracking' : 'Track');
   add.addEventListener('click', async () => {
     add.disabled = true;
-    add.textContent = 'Adding…';
+    add.textContent = tr('Adding…');
     try {
       await call('POST', '/api/shows', { source: show.source, id: show.id });
       ui.added.add(show.key);
@@ -403,7 +409,7 @@ function showCard(show, { reason, dismissable } = {}) {
       render();
     } catch (e) {
       add.disabled = false;
-      add.textContent = 'Retry';
+      add.textContent = tr('Retry');
       add.title = e.message;
     }
   });
@@ -509,7 +515,7 @@ function viewDiscover() {
       const SITES = { crunchyroll: 'Crunchyroll', hidive: 'HIDIVE' };
       const trackAll = async (e) => {
         e.target.disabled = true;
-        e.target.textContent = 'Adding…';
+        e.target.textContent = tr('Adding…');
         try {
           for (const x of seen) await call('POST', '/api/shows', { source: x.source, id: x.id });
           ui.error = null;
@@ -527,13 +533,13 @@ function viewDiscover() {
           h(
             'div',
             { class: 'section-head' },
-            h('h2', {}, `From your streaming sites${seen.length ? ` · ${seen.length}` : ''}`),
-            seen.length > 1 && h('button', { class: 'btn', type: 'button', onclick: trackAll }, `Track all ${seen.length}`),
+            h('h2', {}, T`From your streaming sites${seen.length ? ` · ${seen.length}` : ''}`),
+            seen.length > 1 && h('button', { class: 'btn', type: 'button', onclick: trackAll }, T`Track all ${seen.length}`),
           ),
           seen.length
-            ? tiles(seen, (x) => ({ reason: x.from === 'watchlist' ? `On your ${SITES[x.provider] || 'streaming'} watchlist` : `Watched on ${SITES[x.provider] || 'a streaming site'}`, dismissable: true }))
+            ? tiles(seen, (x) => ({ reason: x.from === 'watchlist' ? T`On your ${SITES[x.provider] || 'streaming'} watchlist` : T`Watched on ${SITES[x.provider] || 'a streaming site'}`, dismissable: true }))
             : h('p', { class: 'muted' }, 'Looking up the shows your extension reported…'),
-          d.seenPending > 0 && seen.length > 0 && h('p', { class: 'muted small' }, `${d.seenPending} more still being looked up. Reload in a minute.`),
+          d.seenPending > 0 && seen.length > 0 && h('p', { class: 'muted small' }, T`${d.seenPending} more still being looked up. Reload in a minute.`),
         ),
       );
     }
@@ -543,11 +549,11 @@ function viewDiscover() {
     const fresh = d.sequels.filter((s) => s.fresh);
     const older = d.sequels.filter((s) => !s.fresh);
     out.push(
-      h('section', {}, h('h2', {}, 'New seasons of shows you track'), fresh.length ? tiles(fresh, (s) => ({ reason: `New season of ${s.from}` })) : h('p', { class: 'muted' }, 'No new seasons announced right now. You will get an alert when one is.')),
+      h('section', {}, h('h2', {}, 'New seasons of shows you track'), fresh.length ? tiles(fresh, (s) => ({ reason: T`New season of ${s.from}` })) : h('p', { class: 'muted' }, 'No new seasons announced right now. You will get an alert when one is.')),
     );
-    if (older.length) out.push(h('section', {}, h('h2', {}, 'Later seasons already out'), tiles(older, (s) => ({ reason: `Follows ${s.from}`, dismissable: true }))));
+    if (older.length) out.push(h('section', {}, h('h2', {}, 'Later seasons already out'), tiles(older, (s) => ({ reason: T`Follows ${s.from}`, dismissable: true }))));
     out.push(
-      h('section', {}, h('h2', {}, 'You might like'), d.recs.length ? tiles(d.recs, (s) => ({ reason: `Because you track ${s.because.join(', ')}`, dismissable: true })) : h('p', { class: 'muted' }, 'No recommendations yet.')),
+      h('section', {}, h('h2', {}, 'You might like'), d.recs.length ? tiles(d.recs, (s) => ({ reason: T`Because you track ${s.because.join(', ')}`, dismissable: true })) : h('p', { class: 'muted' }, 'No recommendations yet.')),
     );
     return out;
   }
@@ -566,7 +572,7 @@ function viewDiscover() {
       h(
         'section',
         {},
-        h('h2', {}, `Season premieres on streaming · next two weeks · ${country}`),
+        h('h2', {}, T`Season premieres on streaming · next two weeks · ${country}`),
         ui.premieres.list.length ? tiles(ui.premieres.list, (x) => ({ reason: x.premiere })) : h('p', { class: 'muted' }, 'Nothing listed.'),
       ),
     );
@@ -580,11 +586,11 @@ function viewDiscover() {
     if (!p) return [...out, empty(ui.loading.popular === 'busy' ? 'Finding series and films…' : 'Could not load', ui.loading.popular === 'busy' ? '' : ui.loading.popular || '')];
     const whole = ui.mineOnly;
     ui.mineOnly = false; // these lists do not say where a title streams, so the services filter would hide everything
-    if (p.recs.length) out.push(h('section', {}, h('h2', {}, 'Because of the series and films you track'), tiles(p.recs, (s) => ({ reason: `Because you track ${s.because.join(', ')}`, dismissable: true }))));
+    if (p.recs.length) out.push(h('section', {}, h('h2', {}, 'Because of the series and films you track'), tiles(p.recs, (s) => ({ reason: T`Because you track ${s.because.join(', ')}`, dismissable: true }))));
     out.push(h('section', {}, h('h2', {}, 'Popular series this week'), tiles(p.tv, { dismissable: true })));
     out.push(h('section', {}, h('h2', {}, 'Popular films this week'), tiles(p.movies, { dismissable: true })));
     ui.mineOnly = whole;
-    out.push(h('p', { class: 'muted small' }, `From TMDB. Anime is left out here; it has its own tabs.${p.recs.length ? '' : ' Track a TV series or a film and suggestions based on it appear at the top.'}`));
+    out.push(h('p', { class: 'muted small' }, T`From TMDB. Anime is left out here; it has its own tabs.${p.recs.length ? '' : ' Track a TV series or a film and suggestions based on it appear at the top.'}`));
     return out;
   }
 
@@ -608,7 +614,7 @@ function viewDiscover() {
   const data = ui.seasons[which];
   const status = ui.loading[`season-${which}`];
   if (!data) return [...out, empty(status === 'busy' ? 'Loading the season…' : 'Could not load', status === 'busy' ? '' : status || '')];
-  out.push(h('section', {}, h('h2', {}, `${SEASON_NAMES[data.season]} ${data.year} · most popular first`), tiles(data.list)));
+  out.push(h('section', {}, h('h2', {}, T`${SEASON_NAMES[data.season]} ${data.year} · most popular first`), tiles(data.list)));
   return out;
 }
 
@@ -656,15 +662,15 @@ function viewWatchNext() {
           'div',
           { class: 'sub' },
           seriesTitle
-            ? `Next: ${show.title} — ${st.next.label} · ${totalBehind} to watch across ${seasons} seasons`
-            : `Next: ${st.next.label} · ${st.behind} to watch${show.source === 'anilist' && show.total ? ` of ${show.total}` : ''}`,
+            ? T`Next: ${show.title} — ${st.next.label} · ${totalBehind} to watch across ${seasons} seasons`
+            : T`Next: ${st.next.label} · ${st.behind} to watch${show.source === 'anilist' && show.total ? T` of ${show.total}` : ''}`,
         ),
       ),
       h(
         'div',
         { class: 'side' },
-        mine && link(mine.url, `Watch on ${mine.name}`, `badge mine ${mine.id}`),
-        h('button', { class: 'btn', type: 'button', onclick: () => act('POST', '/api/watched', { ids: [st.next.id] }) }, `Watched ${st.next.label}`),
+        mine && link(mine.url, T`Watch on ${mine.name}`, `badge mine ${mine.id}`),
+        h('button', { class: 'btn', type: 'button', onclick: () => act('POST', '/api/watched', { ids: [st.next.id] }) }, T`Watched ${st.next.label}`),
         st.behind > 1 &&
           h(
             'button',
@@ -673,7 +679,7 @@ function viewWatchNext() {
               type: 'button',
               title: 'Mark every episode that is out as watched',
               onclick: () => {
-                if (confirm(`Mark all ${st.behind} episodes of "${show.title}" as watched?`)) caughtUp(show, st);
+                if (ask(T`Mark all ${st.behind} episodes of "${show.title}" as watched?`)) caughtUp(show, st);
               },
             },
             'Caught up',
@@ -686,13 +692,13 @@ function viewWatchNext() {
   const going = rows.filter((x) => x.st.started).sort(byLeft);
   const fresh = rows.filter((x) => !x.st.started).sort(byLeft);
   const out = [];
-  if (going.length) out.push(h('section', {}, h('h2', {}, `Continue watching · ${going.length}`), h('div', { class: 'list' }, going.map(row))));
+  if (going.length) out.push(h('section', {}, h('h2', {}, T`Continue watching · ${going.length}`), h('div', { class: 'list' }, going.map(row))));
   if (fresh.length) {
     out.push(
       h(
         'section',
         {},
-        h('h2', {}, `Not started · ${fresh.length}`),
+        h('h2', {}, T`Not started · ${fresh.length}`),
         going.length ? h('details', {}, h('summary', {}, 'Show these'), h('div', { class: 'list' }, fresh.map(row))) : h('div', { class: 'list' }, fresh.map(row)),
       ),
     );
@@ -705,7 +711,7 @@ function viewWatchNext() {
 function showRow(show, now, nested = false) {
   const next = nextEpisode(show, now);
   const nextText = next
-    ? `Next: ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`} (${formatCountdown(next.airsAt - now)})`
+    ? T`Next: ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`} (${formatCountdown(next.airsAt - now)})`
     : show.note || 'No upcoming episode announced';
   const muted = state.muted.includes(show.key);
   return h(
@@ -733,9 +739,9 @@ function showRow(show, now, nested = false) {
         {
           class: 'btn quiet',
           type: 'button',
-          'aria-label': `Remove ${show.title}`,
+          'aria-label': T`Remove ${show.title}`,
           onclick: () => {
-            if (!confirm(`Stop tracking "${show.title}"?`)) return;
+            if (!ask(T`Stop tracking "${show.title}"?`)) return;
             act('DELETE', `/api/shows?key=${encodeURIComponent(show.key)}`);
           },
         },
@@ -753,7 +759,7 @@ function seriesRow(title, seasons, now) {
   const lead = [...seasons].sort((a, b) => (nextEpisode(a, now)?.airsAt ?? Infinity) - (nextEpisode(b, now)?.airsAt ?? Infinity))[0];
   const next = nextEpisode(lead, now);
   const nextText = next
-    ? `Next: ${lead.title} — ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`} (${formatCountdown(next.airsAt - now)})`
+    ? T`Next: ${lead.title} — ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`} (${formatCountdown(next.airsAt - now)})`
     : seasons.map((x) => x.note).find(Boolean) || 'No upcoming episode announced';
   const allMuted = seasons.every((x) => state.muted.includes(x.key));
   const each = async (fn) => {
@@ -769,7 +775,7 @@ function seriesRow(title, seasons, now) {
     'div',
     { class: 'row series' },
     thumb(lead),
-    h('div', { class: 'body' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, `${seasons.length} seasons tracked · ${nextText}`)),
+    h('div', { class: 'body' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, T`${seasons.length} seasons tracked · ${nextText}`)),
     h(
       'div',
       { class: 'side' },
@@ -802,9 +808,9 @@ function seriesRow(title, seasons, now) {
         {
           class: 'btn quiet',
           type: 'button',
-          'aria-label': `Remove ${title}`,
+          'aria-label': T`Remove ${title}`,
           onclick: () => {
-            if (confirm(`Stop tracking all ${seasons.length} seasons of "${title}"?`)) each((x) => call('DELETE', `/api/shows?key=${encodeURIComponent(x.key)}`));
+            if (ask(T`Stop tracking all ${seasons.length} seasons of "${title}"?`)) each((x) => call('DELETE', `/api/shows?key=${encodeURIComponent(x.key)}`));
           },
         },
         'Remove',
@@ -880,7 +886,7 @@ function viewSettings() {
   const notice = h('p', { class: 'muted small', role: 'status' }, ui.notice || '');
   const say = (text) => {
     ui.notice = text;
-    notice.textContent = text;
+    notice.textContent = tr(text);
   };
   const saveChannels = async () => {
     await call('PUT', '/api/settings', { ntfyUrl: ntfy.value, discordWebhook: discord.value });
@@ -888,6 +894,28 @@ function viewSettings() {
   const feedUrl = `${location.origin}/calendar.ics?token=${state.feedToken}`;
 
   return [
+    h(
+      'section',
+      {},
+      h('h2', {}, 'Language'),
+      h(
+        'div',
+        { class: 'card' },
+        h(
+          'label',
+          { class: 'field', for: 'language' },
+          'Show the app in',
+          h(
+            'select',
+            { id: 'language', onchange: (e) => setLanguage(e.target.value) },
+            h('option', { value: '', selected: !s.language }, 'My browser’s language'),
+            // (Each language is listed under its own name, whatever the app is showing.)
+            Object.entries(LANGUAGES).map(([code, name]) => h('option', { value: code, selected: s.language === code }, document.createTextNode(name))),
+          ),
+        ),
+        h('p', { class: 'muted small' }, 'Applies wherever you sign in. Titles of shows stay as the schedule sources list them.'),
+      ),
+    ),
     h(
       'section',
       {},
@@ -1022,7 +1050,7 @@ function viewSettings() {
             'select',
             { id, onchange: () => saveTiming() },
             allowOff && h('option', { value: '', selected: value == null }, 'Off'),
-            Array.from({ length: 24 }, (_, i) => h('option', { value: i, selected: value === i }, new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).format(new Date(2020, 0, 1, i)))),
+            Array.from({ length: 24 }, (_, i) => h('option', { value: i, selected: value === i }, new Intl.DateTimeFormat(LOCALE, { hour: 'numeric' }).format(new Date(2020, 0, 1, i)))),
           );
         const pick = (id, value, options) => h('select', { id, onchange: () => saveTiming() }, options.map(([v, label]) => h('option', { value: v, selected: value === v }, label)));
         const mode = pick('alert-mode', s.alertMode, [['instant', 'As each episode airs'], ['digest', 'Once a day, as a summary']]);
@@ -1046,8 +1074,8 @@ function viewSettings() {
           h(
             'p',
             { class: 'muted small' },
-            `Times use the time zone ${s.timeZone || 'UTC (not set)'}. `,
-            s.timeZone !== deviceZone && h('button', { class: 'btn', type: 'button', onclick: () => saveTiming({ timeZone: deviceZone }) }, `Use this device’s (${deviceZone})`),
+            T`Times use the time zone ${s.timeZone || 'UTC (not set)'}. `,
+            s.timeZone !== deviceZone && h('button', { class: 'btn', type: 'button', onclick: () => saveTiming({ timeZone: deviceZone }) }, T`Use this device’s (${deviceZone})`),
           ),
           h('p', { class: 'muted small' }, 'To silence a single show, use Mute on the My shows tab.'),
         );
@@ -1071,7 +1099,7 @@ function viewSettings() {
               class: 'btn',
               type: 'button',
               onclick: () => {
-                if (confirm('Create a new feed address? The old one stops working, so calendars subscribed to it must be re-added.')) act('POST', '/api/feed/rotate');
+                if (ask('Create a new feed address? The old one stops working, so calendars subscribed to it must be re-added.')) act('POST', '/api/feed/rotate');
               },
             },
             'Replace with a new address',
@@ -1086,7 +1114,7 @@ function viewSettings() {
       (() => {
         const out = h('p', { class: 'muted small', role: 'status' });
         const report = (r, what) => {
-          out.textContent = `${what}: ${r.added} added${r.skipped ? `, ${r.skipped} already on your list or unavailable` : ''}.`;
+          out.textContent = tr(T`${what}: ${r.added} added${r.skipped ? T`, ${r.skipped} already on your list or unavailable` : ''}.`);
         };
         const file = h('input', {
           type: 'file',
@@ -1094,11 +1122,11 @@ function viewSettings() {
           accept: 'application/json,.json',
           onchange: async () => {
             if (!file.files[0]) return;
-            out.textContent = 'Restoring…';
+            out.textContent = tr('Restoring…');
             try {
               report(await call('POST', '/api/import', JSON.parse(await file.files[0].text())), 'Restore finished');
             } catch (e) {
-              out.textContent = e instanceof SyntaxError ? 'That file is not a Show Tracker backup.' : e.message;
+              out.textContent = tr(e instanceof SyntaxError ? 'That file is not a Show Tracker backup.' : e.message);
             }
             file.value = '';
           },
@@ -1135,11 +1163,11 @@ function viewSettings() {
                 class: 'btn',
                 type: 'button',
                 onclick: async () => {
-                  out.textContent = 'Importing…';
+                  out.textContent = tr('Importing…');
                   try {
                     report(await call('POST', '/api/import/anilist', { username: user.value }), 'Import finished');
                   } catch (e) {
-                    out.textContent = e.message;
+                    out.textContent = tr(e.message);
                   }
                 },
               },
@@ -1256,12 +1284,12 @@ function pushSection(say) {
           h(
             'div',
             { class: 'row' },
-            h('div', { class: 'body' }, h('div', { class: 'title' }, d.id === ui.pushHere ? `${d.name} (this device)` : d.name), h('div', { class: 'sub' }, `Turned on ${fmtShortDay.format(d.createdAt)}`)),
+            h('div', { class: 'body' }, h('div', { class: 'title' }, d.id === ui.pushHere ? T`${d.name} (this device)` : d.name), h('div', { class: 'sub' }, T`Turned on ${fmtShortDay.format(d.createdAt)}`)),
             d.id !== ui.pushHere &&
               h(
                 'div',
                 { class: 'side' },
-                h('button', { class: 'btn quiet', type: 'button', onclick: () => confirm(`Stop sending notifications to “${d.name}”?`) && act('DELETE', `/api/push?id=${encodeURIComponent(d.id)}`) }, 'Remove'),
+                h('button', { class: 'btn quiet', type: 'button', onclick: () => ask(T`Stop sending notifications to “${d.name}”?`) && act('DELETE', `/api/push?id=${encodeURIComponent(d.id)}`) }, 'Remove'),
               ),
           ),
         ),
@@ -1287,7 +1315,7 @@ function viewProfile() {
           h(
             'div',
             { class: 'actions' },
-            h('button', { class: 'btn', type: 'button', onclick: () => call('PUT', '/api/account', { username: name.value }).then(() => (out.textContent = 'Username saved.'), (e) => (out.textContent = e.message)) }, 'Save username'),
+            h('button', { class: 'btn', type: 'button', onclick: () => call('PUT', '/api/account', { username: name.value }).then(() => (out.textContent = tr('Username saved.')), (e) => (out.textContent = tr(e.message))) }, 'Save username'),
           ),
           out,
           state.mail &&
@@ -1302,7 +1330,7 @@ function viewProfile() {
                     ui.notice = null;
                     render();
                   },
-                  (e) => (mailOut.textContent = e.message),
+                  (e) => (mailOut.textContent = tr(e.message)),
                 );
               };
               return [
@@ -1311,9 +1339,9 @@ function viewProfile() {
                   'p',
                   { class: 'muted small' },
                   state.me.pendingEmail
-                    ? `A confirmation link was sent to ${state.me.pendingEmail}. Open it within 24 hours to finish.${state.me.email ? ` Until then ${state.me.email} stays in use.` : ''}`
+                    ? T`A confirmation link was sent to ${state.me.pendingEmail}. Open it within 24 hours to finish.${state.me.email ? T` Until then ${state.me.email} stays in use.` : ''}`
                     : state.me.email
-                      ? `${state.me.email} is confirmed. Used only to send you a password-reset link; nobody else on this site can see it.`
+                      ? T`${state.me.email} is confirmed. Used only to send you a password-reset link; nobody else on this site can see it.`
                       : 'Used only to send you a password-reset link. Nobody else on this site can see it, and without one you can still ask for a reset link.',
                 ),
                 h(
@@ -1355,7 +1383,7 @@ function viewProfile() {
                 h(
                   'div',
                   { class: 'row' },
-                  h('div', { class: 'body' }, h('div', { class: 'title' }, k.name), h('div', { class: 'sub' }, `Added ${fmtShortDay.format(k.createdAt)}`)),
+                  h('div', { class: 'body' }, h('div', { class: 'title' }, k.name), h('div', { class: 'sub' }, T`Added ${fmtShortDay.format(k.createdAt)}`)),
                   h(
                     'div',
                     { class: 'side' },
@@ -1366,7 +1394,7 @@ function viewProfile() {
                         type: 'button',
                         onclick: async () => {
                           const last = keys.length === 1;
-                          const password = await askPassword(last ? `Enter your password to remove “${k.name}”. It is your only passkey, so your account will be protected by its password alone.` : `Enter your password to remove the passkey “${k.name}”.`);
+                          const password = await askPassword(last ? T`Enter your password to remove “${k.name}”. It is your only passkey, so your account will be protected by its password alone.` : T`Enter your password to remove the passkey “${k.name}”.`);
                           if (password !== null) act('POST', '/api/passkeys/remove', { id: k.id, password });
                         },
                       },
@@ -1388,13 +1416,13 @@ function viewProfile() {
                       class: 'btn primary',
                       type: 'button',
                       onclick: async () => {
-                        out.textContent = '';
+                        out.textContent = tr('');
                         try {
                           const r = await addPasskey(name.value);
                           ui.codes = r.recoveryCodes;
                           render();
                         } catch (e) {
-                          out.textContent = e.body ? e.message : passkeyError(e);
+                          out.textContent = tr(e.body ? e.message : passkeyError(e));
                         }
                       },
                     },
@@ -1404,7 +1432,7 @@ function viewProfile() {
               ]
             : h('p', { class: 'muted small' }, 'This browser does not support passkeys.'),
           keys.length > 0 && [
-            h('p', { class: 'muted' }, `Recovery codes left: ${state.me.recoveryCodesLeft} of 10. Each one signs you in once without a passkey.`),
+            h('p', { class: 'muted' }, T`Recovery codes left: ${state.me.recoveryCodesLeft} of 10. Each one signs you in once without a passkey.`),
             h(
               'div',
               { class: 'actions' },
@@ -1414,12 +1442,12 @@ function viewProfile() {
                   class: 'btn',
                   type: 'button',
                   onclick: async () => {
-                    if (!confirm('Make 10 new recovery codes? The old ones stop working.')) return;
+                    if (!ask('Make 10 new recovery codes? The old ones stop working.')) return;
                     try {
                       ui.codes = (await call('POST', '/api/recovery-codes')).recoveryCodes;
                       render();
                     } catch (e) {
-                      out.textContent = e.message;
+                      out.textContent = tr(e.message);
                     }
                   },
                 },
@@ -1443,9 +1471,9 @@ function viewProfile() {
               try {
                 await call('POST', '/api/password', { current: cur.value, next: next.value });
                 cur.value = next.value = '';
-                out.textContent = 'Password changed. Other devices have been signed out.';
+                out.textContent = tr('Password changed. Other devices have been signed out.');
               } catch (err) {
-                out.textContent = err.message;
+                out.textContent = tr(err.message);
               }
             },
           },
@@ -1460,7 +1488,7 @@ function viewProfile() {
               {
                 class: 'btn',
                 type: 'button',
-                onclick: () => call('POST', '/api/sessions/revoke').then(() => (out.textContent = 'Every other device has been signed out.'), (err) => (out.textContent = err.message)),
+                onclick: () => call('POST', '/api/sessions/revoke').then(() => (out.textContent = tr('Every other device has been signed out.')), (err) => (out.textContent = err.message)),
               },
               'Sign out other devices',
             ),
@@ -1481,7 +1509,7 @@ function viewProfile() {
           setTimeout(() => {
             out.replaceChildren(
               h('label', { class: 'field', for: 'new-token' }, 'New access token', h('input', { type: 'text', id: 'new-token', readonly: true, value: ui.newToken, onfocus: (e) => e.target.select() })),
-              h('p', { class: 'muted small' }, `Paste it into the extension’s settings together with this site’s address (${location.origin}). It is shown only this once.`),
+              h('p', { class: 'muted small' }, T`Paste it into the extension’s settings together with this site’s address (${location.origin}). It is shown only this once.`),
             );
             out.querySelector('input').select();
           });
@@ -1498,7 +1526,7 @@ function viewProfile() {
                 h(
                   'div',
                   { class: 'row' },
-                  h('div', { class: 'body' }, h('div', { class: 'title' }, t.name), h('div', { class: 'sub' }, `Created ${fmtShortDay.format(t.createdAt)} · ${t.lastUsedAt ? `last used ${fmtShortDay.format(t.lastUsedAt)}` : 'never used'}`)),
+                  h('div', { class: 'body' }, h('div', { class: 'title' }, t.name), h('div', { class: 'sub' }, T`Created ${fmtShortDay.format(t.createdAt)} · ${t.lastUsedAt ? T`last used ${fmtShortDay.format(t.lastUsedAt)}` : 'never used'}`)),
                   h(
                     'div',
                     { class: 'side' },
@@ -1508,7 +1536,7 @@ function viewProfile() {
                         class: 'btn quiet',
                         type: 'button',
                         onclick: () => {
-                          if (!confirm(`Remove the access token “${t.name}”? The extension using it will stop syncing.`)) return;
+                          if (!ask(T`Remove the access token “${t.name}”? The extension using it will stop syncing.`)) return;
                           ui.newToken = null;
                           act('DELETE', `/api/tokens?id=${encodeURIComponent(t.id)}`);
                         },
@@ -1551,7 +1579,7 @@ function viewProfile() {
       h(
         'div',
         { class: 'card' },
-        h('p', { class: 'muted' }, `Signed in as ${state.me.username}${state.me.admin ? ' (admin)' : ''}.`),
+        h('p', { class: 'muted' }, T`Signed in as ${state.me.username}${state.me.admin ? ' (admin)' : ''}.`),
         h(
           'div',
           { class: 'actions' },
@@ -1582,7 +1610,7 @@ function viewAdminLocked() {
     render();
   };
   const fail = (e) => {
-    msg.textContent = e.body || !e.name ? e.message : passkeyError(e);
+    msg.textContent = tr(e.body || !e.name ? e.message : passkeyError(e));
     // A passkey challenge works once: fetch a fresh one for the next try.
     if (gate.method === 'passkey') call('GET', '/api/admin/unlock').then((g) => (ui.adminGate = g), () => {});
   };
@@ -1679,7 +1707,7 @@ function viewAdmin() {
           'div',
           { class: 'card' },
           h('p', { class: a.encrypted ? 'muted' : 'error' }, a.encrypted ? 'Data is encrypted at rest.' : 'Data is NOT encrypted at rest: no DATA_KEY is set on the server.'),
-          h('p', { class: 'muted' }, `E-mail is ${a.mail ? 'on' : 'off'} · movies are ${a.movies ? 'on' : 'off'}.`),
+          h('p', { class: 'muted' }, T`E-mail is ${a.mail ? 'on' : 'off'} · movies are ${a.movies ? 'on' : 'off'}.`),
           h('div', { class: 'checks' }, toggle('backupEmail', 'E-mail me the encrypted data file every week, as an off-site backup')),
           h(
             'p',
@@ -1689,7 +1717,7 @@ function viewAdmin() {
               : !canMail
                 ? 'Needs e-mail to be on and a confirmed address on your profile.'
                 : a.lastBackupEmail
-                  ? `Last sent ${fmtShortDay.format(a.lastBackupEmail)}. The file is useless without the DATA_KEY: keep that safe as well.`
+                  ? T`Last sent ${fmtShortDay.format(a.lastBackupEmail)}. The file is useless without the DATA_KEY: keep that safe as well.`
                   : 'The first one goes out within a minute or two. The file is useless without the DATA_KEY: keep that safe as well.',
           ),
           h('div', { class: 'checks' }, toggle('healthAlerts', 'Alert me when schedule updates have been failing for 3 hours')),
@@ -1724,7 +1752,7 @@ function viewAdmin() {
               h(
                 'div',
                 { class: 'row' },
-                h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, `Joined ${fmtShortDay.format(p.createdAt)} · ${p.mfa ? 'passkey on' : 'no passkey'}`)),
+                h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, T`Joined ${fmtShortDay.format(p.createdAt)} · ${p.mfa ? 'passkey on' : 'no passkey'}`)),
                 h(
                   'div',
                   { class: 'side' },
@@ -1734,7 +1762,7 @@ function viewAdmin() {
                       class: 'btn',
                       type: 'button',
                       onclick: () =>
-                        call('POST', '/api/admin/reset', { id: p.id }).then((r) => showLink(`Password reset link for ${p.username}`, `${location.origin}/#reset=${r.token}`, 'Works once, for 24 hours. Send it to them privately.'), fail),
+                        call('POST', '/api/admin/reset', { id: p.id }).then((r) => showLink(T`Password reset link for ${p.username}`, `${location.origin}/#reset=${r.token}`, 'Works once, for 24 hours. Send it to them privately.'), fail),
                     },
                     'Reset link',
                   ),
@@ -1747,7 +1775,7 @@ function viewAdmin() {
                         type: 'button',
                         title: 'For someone who lost their passkey and their recovery codes',
                         onclick: async () => {
-                          if (!confirm(`Remove ${p.username}’s passkeys and recovery codes? They will sign in with their password alone until they add a new passkey.`)) return;
+                          if (!ask(T`Remove ${p.username}’s passkeys and recovery codes? They will sign in with their password alone until they add a new passkey.`)) return;
                           try {
                             ui.admin = await call('POST', '/api/admin/mfa/clear', { id: p.id });
                             render();
@@ -1765,7 +1793,7 @@ function viewAdmin() {
                         class: 'btn quiet',
                         type: 'button',
                         onclick: async () => {
-                          if (!confirm(`Delete ${p.username}’s account and everything in it? This cannot be undone.`)) return;
+                          if (!ask(T`Delete ${p.username}’s account and everything in it? This cannot be undone.`)) return;
                           try {
                             ui.admin = await call('DELETE', `/api/admin/users?id=${encodeURIComponent(p.id)}`);
                             render();
@@ -1802,7 +1830,7 @@ function viewAdmin() {
             ),
           ),
           out,
-          h('h3', { class: 'sub-head' }, `Unused invite links (${a.invites.length})`),
+          h('h3', { class: 'sub-head' }, T`Unused invite links (${a.invites.length})`),
           a.invites.length
             ? h(
                 'div',
@@ -1815,7 +1843,7 @@ function viewAdmin() {
                       'div',
                       { class: 'body' },
                       h('div', { class: 'title' }, inv.note || 'Invite'),
-                      h('div', { class: 'sub' }, `${inv.createdAt ? `Created ${fmtShortDay.format(inv.createdAt)} · ` : ''}expires ${fmtShortDay.format(inv.expiresAt)}`),
+                      h('div', { class: 'sub' }, T`${inv.createdAt ? T`Created ${fmtShortDay.format(inv.createdAt)} · ` : ''}expires ${fmtShortDay.format(inv.expiresAt)}`),
                     ),
                     h(
                       'div',
@@ -1825,9 +1853,9 @@ function viewAdmin() {
                         {
                           class: 'btn quiet',
                           type: 'button',
-                          'aria-label': `Remove invite ${inv.note || ''}`,
+                          'aria-label': T`Remove invite ${inv.note || ''}`,
                           onclick: async () => {
-                            if (!confirm('Remove this invite? Its link will stop working.')) return;
+                            if (!ask('Remove this invite? Its link will stop working.')) return;
                             try {
                               ui.admin = await call('DELETE', `/api/admin/invites?id=${inv.id}`);
                               ui.newInvite = null;
@@ -1893,7 +1921,7 @@ function deviceName() {
   const ua = navigator.userAgent;
   const os = /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'This device';
   const browser = /Firefox\//.test(ua) ? 'Firefox' : /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
-  return browser ? `${browser} on ${os}` : os;
+  return browser ? T`${browser} on ${os}` : os;
 }
 
 /** Turn a browser passkey error into something a person can act on. */
@@ -1935,10 +1963,30 @@ async function signWithPasskey(o) {
 }
 
 /** After any successful sign-in: load the account and decide what to show first. */
+/** Remember a language on this device; true when that changes what the page should be showing. */
+function rememberLanguage(code) {
+  try {
+    if (code) localStorage.setItem('lang', code);
+    else localStorage.removeItem('lang');
+  } catch {
+    return false; // nowhere to remember it, so a reload would change nothing
+  }
+  return true;
+}
+
+async function setLanguage(code) {
+  await call('PUT', '/api/settings', { language: code });
+  // The page is built in one language: start it again in the new one.
+  if (rememberLanguage(code)) location.reload();
+}
+
 async function enterApp() {
   ui.mfa = null;
   ui.session = { ...ui.session, setup: true, authed: true };
   await call('GET', '/api/state');
+  // Signed in somewhere new: switch to the language chosen for this account.
+  const wanted = state.settings.language;
+  if (wanted && wanted !== LANG && Object.hasOwn(LANGUAGES, wanted) && rememberLanguage(wanted)) return location.reload();
   await adoptTimeZone();
   let skipped = false;
   try {
@@ -1955,14 +2003,14 @@ function viewMfa() {
   const msg = h('p', { class: 'error small', role: 'alert' });
   const code = h('input', { type: 'text', id: 'recovery-code', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', placeholder: 'xxxxx-xxxxx' });
   const usePasskey = async () => {
-    msg.textContent = '';
+    msg.textContent = tr('');
     try {
       const response = await signWithPasskey(ui.mfa.options);
       await call('POST', '/api/login/passkey', { response });
       await enterApp();
     } catch (e) {
       if (e.body?.options) ui.mfa.options = e.body.options;
-      msg.textContent = e.body ? e.message : passkeyError(e);
+      msg.textContent = tr(e.body ? e.message : passkeyError(e));
     }
   };
   const view = h(
@@ -1977,14 +2025,14 @@ function viewMfa() {
         class: 'stack',
         onsubmit: async (e) => {
           e.preventDefault();
-          msg.textContent = '';
+          msg.textContent = tr('');
           try {
             const r = await call('POST', '/api/login/recovery', { code: code.value });
             await enterApp();
-            ui.info = `Signed in with a recovery code. ${r.recoveryCodesLeft} left — add a passkey on this device under Profile → Passkeys and password.`;
+            ui.info = T`Signed in with a recovery code. ${r.recoveryCodesLeft} left — add a passkey on this device under Profile → Passkeys and password.`;
             render();
           } catch (err) {
-            msg.textContent = err.message;
+            msg.textContent = tr(err.message);
           }
         },
       },
@@ -2032,14 +2080,14 @@ function viewOfferPasskey() {
         type: 'button',
         id: 'add-passkey',
         onclick: async () => {
-          msg.textContent = '';
+          msg.textContent = tr('');
           try {
             const r = await addPasskey(deviceName());
             ui.offerPasskey = false;
             ui.codes = r.recoveryCodes;
             render();
           } catch (e) {
-            msg.textContent = e.body ? e.message : passkeyError(e);
+            msg.textContent = tr(e.body ? e.message : passkeyError(e));
           }
         },
       },
@@ -2062,7 +2110,7 @@ function viewCodes() {
     h(
       'div',
       { class: 'actions' },
-      h('button', { class: 'btn', type: 'button', onclick: (e) => navigator.clipboard?.writeText(text).then(() => (e.target.textContent = 'Copied')) }, 'Copy'),
+      h('button', { class: 'btn', type: 'button', onclick: (e) => navigator.clipboard?.writeText(text).then(() => (e.target.textContent = tr('Copied'))) }, 'Copy'),
       h('a', { class: 'btn', href: `data:text/plain;charset=utf-8,${encodeURIComponent(`Show Tracker recovery codes for ${state.me.username}\n\n${text}\n`)}`, download: 'show-tracker-recovery-codes.txt' }, 'Download'),
     ),
     h(
@@ -2103,10 +2151,10 @@ function viewForgot() {
         try {
           await call('POST', '/api/forgot', { identifier: who.value });
           msg.className = 'small';
-          msg.textContent = 'If that account has a confirmed e-mail address, a reset link is on its way. It works for 30 minutes.';
+          msg.textContent = tr('If that account has a confirmed e-mail address, a reset link is on its way. It works for 30 minutes.');
         } catch (err) {
           msg.className = 'error small';
-          msg.textContent = err.message;
+          msg.textContent = tr(err.message);
         }
       },
     },
@@ -2142,7 +2190,7 @@ function viewAuth() {
   const intro = {
     setup: 'This is the first visit. Create the admin account that will look after this site.',
     invite: 'You have been invited. Pick a username and a password of at least 8 characters.',
-    reset: `Setting a new password for ${link?.username || 'your account'}. Every device signed in to it will be signed out.`,
+    reset: T`Setting a new password for ${link?.username || 'your account'}. Every device signed in to it will be signed out.`,
   }[mode];
   const form = h(
     'form',
@@ -2150,7 +2198,7 @@ function viewAuth() {
       class: 'card auth',
       onsubmit: async (e) => {
         e.preventDefault();
-        msg.textContent = '';
+        msg.textContent = tr('');
         try {
           const r = await send();
           if (link) dropLink();
@@ -2161,7 +2209,7 @@ function viewAuth() {
           }
           await enterApp();
         } catch (err) {
-          msg.textContent = err.message;
+          msg.textContent = tr(err.message);
         }
       },
     },
@@ -2199,14 +2247,14 @@ function viewShared() {
   const now = Date.now();
   const sorted = [...list].sort((a, b) => (nextEpisode(a, now)?.airsAt ?? Infinity) - (nextEpisode(b, now)?.airsAt ?? Infinity) || a.title.localeCompare(b.title));
   return [
-    h('section', {}, h('h2', {}, `${username}’s list · ${list.length} show${list.length === 1 ? '' : 's'}`)),
+    h('section', {}, h('h2', {}, T`${username}’s list · ${tn(list.length, '{0} show', '{0} shows')}`)),
     list.length
       ? h(
           'div',
           { class: 'list' },
           sorted.map((show) => {
             const next = nextEpisode(show, now);
-            const when = next ? `Next: ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`}` : show.note || 'No upcoming episode announced';
+            const when = next ? T`Next: ${next.label} · ${fmtShortDay.format(next.airsAt)}${next.dateOnly ? '' : `, ${fmtTime.format(next.airsAt)}`}` : show.note || 'No upcoming episode announced';
             return h('div', { class: 'row' }, thumb(show), h('div', { class: 'body' }, h('div', { class: 'title' }, link(show.url, show.title)), h('div', { class: 'sub' }, `${show.status} · ${when}`)), h('div', { class: 'side' }, badges(show, { kind: true })));
           }),
         )
@@ -2252,7 +2300,7 @@ function render() {
     document.body.classList.add('signed-out');
     $('banner').hidden = !ui.error && !ui.info;
     $('banner').classList.toggle('good', !ui.error && Boolean(ui.info));
-    $('banner').textContent = ui.error || ui.info || '';
+    $('banner').textContent = tr(ui.error || ui.info || '');
     $('view').replaceChildren(...(ui.session ? [viewAuth()] : [empty('Loading…', '')]));
     return;
   }
@@ -2278,21 +2326,21 @@ function render() {
   const problem = ui.error || (ui.offline ? 'You are offline. This is the last saved copy of your schedule; changes need a connection.' : state.lastError);
   $('banner').hidden = !problem && !ui.info;
   $('banner').classList.toggle('good', !problem && Boolean(ui.info));
-  $('banner').textContent = problem || ui.info || '';
+  $('banner').textContent = tr(problem || ui.info || '');
 
   $('refresh-btn').disabled = ui.refreshing || !shows().length;
-  $('refresh-btn').textContent = ui.refreshing ? 'Refreshing…' : 'Refresh';
-  $('refresh-status').textContent = state.lastRefresh && shows().length ? `Updated ${fmtTime.format(state.lastRefresh)}` : '';
+  $('refresh-btn').textContent = tr(ui.refreshing ? 'Refreshing…' : 'Refresh');
+  $('refresh-status').textContent = tr(state.lastRefresh && shows().length ? T`Updated ${fmtTime.format(state.lastRefresh)}` : '');
 
   document.title = unread ? `(${unread}) Show Tracker` : 'Show Tracker';
 
   syncSearchSources();
   const profileBtn = $('profile-btn');
-  profileBtn.textContent = (state.me.username[0] || '?').toUpperCase();
-  profileBtn.title = `Account: ${state.me.username}`;
-  profileBtn.setAttribute('aria-label', `Account menu for ${state.me.username}`);
+  profileBtn.textContent = tr((state.me.username[0] || '?').toUpperCase());
+  profileBtn.title = T`Account: ${state.me.username}`;
+  profileBtn.setAttribute('aria-label', T`Account menu for ${state.me.username}`);
   profileBtn.setAttribute('aria-current', ui.tab === 'profile' ? 'page' : 'false');
-  $('menu-who').textContent = `Signed in as ${state.me.username}`;
+  $('menu-who').textContent = tr(T`Signed in as ${state.me.username}`);
 
   // An admin page left open by someone who is no longer an admin falls back to the start.
   const build = PAGES[ui.tab] || visibleTabs().find(([id]) => id === ui.tab)?.[2] || viewUpcoming;
@@ -2377,9 +2425,9 @@ function syncInstall() {
   // Not on top of the sign-in screens or the tour, and not again after "Not now".
   const show = able && $('news').hidden && Boolean(ui.session?.authed) && !document.body.classList.contains('signed-out') && tour.at < 0 && state.settings.tourDone && !install.asked && !installDismissed();
   $('install').hidden = !show;
-  $('install-how').textContent = install.prompt ? 'It opens like an app and can send you notifications.' : installHint();
+  $('install-how').textContent = tr(install.prompt ? 'It opens like an app and can send you notifications.' : installHint());
   $('install-yes').hidden = !install.prompt;
-  $('install-no').textContent = install.prompt ? 'Not now' : 'Got it';
+  $('install-no').textContent = tr(install.prompt ? 'Not now' : 'Got it');
 }
 
 async function runInstall() {
@@ -2450,12 +2498,12 @@ function startTour() {
 function showTourStep(i) {
   tour.at = i;
   const step = tour.steps[i];
-  $('tour-count').textContent = `Step ${i + 1} of ${tour.steps.length}`;
-  $('tour-title').textContent = step.title;
-  $('tour-text').textContent = step.text;
+  $('tour-count').textContent = tr(T`Step ${i + 1} of ${tour.steps.length}`);
+  $('tour-title').textContent = tr(step.title);
+  $('tour-text').textContent = tr(step.text);
   $('tour-back').hidden = i === 0;
   $('tour-skip').hidden = i === tour.steps.length - 1;
-  $('tour-next').textContent = i === tour.steps.length - 1 ? 'Done' : i === 0 ? 'Start' : 'Next';
+  $('tour-next').textContent = tr(i === tour.steps.length - 1 ? 'Done' : i === 0 ? 'Start' : 'Next');
   // Show the page being described behind the note. setTab renders, which places the tour.
   // Steps about the header show the home page behind them.
   const page = step.tab || 'upcoming';
@@ -2602,16 +2650,16 @@ function resultRow(show, nested = false) {
   const btn = h('button', { class: `btn${tracked ? '' : ' primary'}`, type: 'button', disabled: tracked }, tracked ? 'Added' : 'Add');
   btn.addEventListener('click', async () => {
     btn.disabled = true;
-    btn.textContent = 'Adding…';
+    btn.textContent = tr('Adding…');
     try {
       await call('POST', '/api/shows', { source: show.source, id: show.id });
-      btn.textContent = 'Added';
+      btn.textContent = tr('Added');
       btn.classList.remove('primary');
       ui.error = null;
       render();
     } catch (e) {
       btn.disabled = false;
-      btn.textContent = 'Retry';
+      btn.textContent = tr('Retry');
       btn.title = e.message;
     }
   });
@@ -2630,10 +2678,10 @@ async function runSearch() {
   try {
     const found = await call('GET', `/api/search?source=${searchSource.value}&q=${encodeURIComponent(q)}`);
     if (seq !== searchSeq) return;
-    resultsEl.replaceChildren(...(found.length ? foldSeasons(found).flatMap(({ show, seasons }) => [resultRow(show), ...seasons.map((x) => resultRow(x, true))]) : [h('div', { class: 'empty' }, `${{ all: 'Nothing', anime: 'No anime', tv: 'No TV shows', movie: 'No movies' }[searchSource.value]} found for “${q}”.`)]));
+    resultsEl.replaceChildren(...(found.length ? foldSeasons(found).flatMap(({ show, seasons }) => [resultRow(show), ...seasons.map((x) => resultRow(x, true))]) : [h('div', { class: 'empty' }, T`${{ all: 'Nothing', anime: 'No anime', tv: 'No TV shows', movie: 'No movies' }[searchSource.value]} found for “${q}”.`)]));
   } catch (e) {
     if (seq !== searchSeq) return;
-    resultsEl.replaceChildren(h('div', { class: 'empty' }, `Search failed: ${e.message}`));
+    resultsEl.replaceChildren(h('div', { class: 'empty' }, T`Search failed: ${e.message}`));
   }
 }
 
@@ -2711,6 +2759,7 @@ async function adoptTimeZone() {
 }
 
 async function boot() {
+  translatePage();
   render();
   // Notifications and offline use. Not on plain http (other than localhost), where browsers do not allow it.
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -2725,7 +2774,7 @@ async function boot() {
     if (hash?.[1] === 'confirm') {
       history.replaceState(null, '', location.pathname);
       const done = await call('POST', '/api/email/confirm', { token: hash[2] });
-      ui.info = `${done.email} is confirmed. You can now use it to reset your password.`;
+      ui.info = T`${done.email} is confirmed. You can now use it to reset your password.`;
       if (ui.session.authed) await call('GET', '/api/state');
     } else if (hash) {
       const info = await call('GET', `/api/link?kind=${hash[1]}&token=${hash[2]}`);
