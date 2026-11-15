@@ -1,3 +1,4 @@
+import { say } from './i18n.js';
 // When alerts may go out: the user's local hour, quiet hours and the daily digest.
 
 export function validTimeZone(tz) {
@@ -29,9 +30,9 @@ export function inQuietHours(hour, start, end) {
   return start < end ? hour >= start && hour < end : hour >= start || hour < end;
 }
 
-/** Fold many alert messages into one. */
-export function summarize(messages) {
+/** Fold many alert messages into one, in the reader's language. */
+export function summarize(messages, lang = 'en') {
   const lines = messages.slice(0, 15).map((m) => `• ${m.title} — ${m.body}`);
-  if (messages.length > 15) lines.push(`…and ${messages.length - 15} more`);
-  return { title: `${messages.length} new on your list`, body: lines.join('\n'), at: messages.at(-1).at };
+  if (messages.length > 15) lines.push(say(lang, '…and {n} more', { n: messages.length - 15 }));
+  return { title: say(lang, '{n} new on your list', { n: messages.length }), body: lines.join('\n'), at: messages.at(-1).at };
 }

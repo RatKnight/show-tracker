@@ -1935,3 +1935,46 @@ test('http: the language setting accepts a language code or "follow the browser"
   assert.equal((await ann.req('PUT', '/api/settings', { region: 'NO' })).body.settings.language, 'nb');
   assert.equal((await ann.req('PUT', '/api/settings', { language: '' })).body.settings.language, '');
 });
+
+test('alerts and e-mails are written in the reader’s language', async (t) => {
+  const { say, sayLabel, languageOf, SERVER_LANGUAGES } = await import('../server/i18n.js');
+  // Every language covers the same sentences and keeps the values.
+  const marks = (s) => (s.match(/\{\w+\}/g) || []).sort().join();
+  const english = ['{label} is out on {where}', '{label} airs in {n} minutes', 'New season of {from} announced', '{n} new on your list', 'Hi {name},', 'Reset your Show Tracker password'];
+  assert.deepEqual(SERVER_LANGUAGES, ['fr', 'de', 'nb', 'es', 'pt', 'it']);
+  for (const lang of SERVER_LANGUAGES) for (const text of english) {
+    const out = say(lang, text);
+    assert.notEqual(out, text, `${lang}: “${text}”`);
+    assert.equal(marks(out), marks(text));
+  }
+  assert.equal(say('de', '{label} airs in {n} minutes', { label: sayLabel('de', 'Episode 5'), n: 10 }), 'Folge 5 läuft in 10 Minuten');
+  assert.equal(say('xx', 'Released today'), 'Released today');
+  assert.equal(sayLabel('fr', 'S2E3'), 'S2E3');
+  assert.equal(languageOf({ settings: { language: '', uiLanguage: 'nb' } }), 'nb');
+  assert.equal(languageOf({ settings: { language: 'fr', uiLanguage: 'nb' } }), 'fr');
+  assert.equal(languageOf({ settings: {} }), 'en');
+
+  // A new episode, for someone reading German and for someone reading English.
+  const { sent, tracker, user, clock, store } = rig();
+  user.settings.ntfyUrl = 'https://ntfy.sh/topic-for-the-test';
+  user.settings.language = 'de';
+  await tracker.addShow(user, 'anilist', 1);
+  clock.t += 2 * DAY;
+  await tracker.tick();
+  const german = sent.flat().map((m) => m.body);
+  assert.ok(german.length > 0 && german.every((b) => /^Folge \d+ ist da/.test(b)), german.join(' | '));
+  store.save();
+
+  // Over HTTP: the app reports the language it is showing, and the test alert follows it.
+  const pushed = [];
+  const app = await serve(t, { send: async (_s, m) => (pushed.push(...m), []) });
+  const ann = app.client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: app.setupCode });
+  await ann.req('PUT', '/api/settings', { ntfyUrl: 'https://ntfy.sh/topic-for-the-test', uiLanguage: 'it' });
+  assert.equal((await ann.req('POST', '/api/test-alert')).status, 200);
+  assert.equal(pushed.at(-1).body, 'Avviso di prova: l’invio funziona.');
+  await ann.req('PUT', '/api/settings', { language: 'en' });
+  await ann.req('POST', '/api/test-alert');
+  assert.equal(pushed.at(-1).body, 'Test alert — delivery is working.');
+  assert.equal((await ann.req('PUT', '/api/settings', { uiLanguage: 'nonsense' })).body.settings.uiLanguage, 'it');
+});
