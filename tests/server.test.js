@@ -1693,7 +1693,7 @@ test('http: notifications go to the devices that asked, a device has one owner, 
 test('the browser scripts parse', async () => {
   // They only run in a browser, so nothing else here would notice a syntax error in them.
   const { execFileSync } = await import('node:child_process');
-  for (const file of ['app/js/app.js', 'app/js/core.js', 'app/js/changes.js', 'app/sw.js']) execFileSync(process.execPath, ['--check', new URL(`../${file}`, import.meta.url).pathname]);
+  for (const file of ['app/js/app.js', 'app/js/core.js', 'app/js/changes.js', 'app/js/i18n.js', 'app/sw.js', ...['fr', 'de', 'nb', 'es', 'pt', 'it'].map((l) => `app/js/lang/${l}.js`)]) execFileSync(process.execPath, ['--check', new URL(`../${file}`, import.meta.url).pathname]);
 });
 
 test('request limiter: stays inside the allowance, lets a waiting person go first, waits out a refusal', async () => {
@@ -1901,4 +1901,37 @@ test('fetching ahead: Discover lists are ready before anyone asks, and tracking 
   await app.warm();
   assert.equal(store.data.shelf['anilist:60'], undefined);
   assert.ok(store.data.shelf['tmdb:310']);
+});
+
+test('languages: every table is well formed and keeps the values a sentence carries', async () => {
+  const marks = (s) => (s.match(/\{\d+\}/g) || []).sort().join();
+  const tables = {};
+  for (const code of ['fr', 'de', 'nb', 'es', 'pt', 'it']) tables[code] = (await import(`../app/js/lang/${code}.js`)).default;
+  const { CHANGES } = await import('../app/js/changes.js');
+  for (const [code, table] of Object.entries(tables)) {
+    assert.ok(Object.keys(table).length > 350, `${code} is complete`);
+    for (const [english, translated] of Object.entries(table)) {
+      assert.equal(typeof translated, 'string');
+      assert.ok(translated.trim(), `${code}: “${english}” is empty`);
+      assert.equal(marks(translated), marks(english), `${code}: “${english}” lost or gained a value`);
+      // Spacing at the ends joins sentences together on the page: it has to survive translation.
+      assert.equal(/^\s/.test(translated), /^\s/.test(english), `${code}: leading space of “${english}”`);
+    }
+    // The newest update note is translated, so nobody is greeted in English.
+    for (const text of [CHANGES[0].title, ...CHANGES[0].items]) assert.ok(table[text], `${code}: update note “${text.slice(0, 40)}…”`);
+  }
+  // The same sentences in every language (a few differ only where a word is the same as in English).
+  const all = new Set(Object.values(tables).flatMap(Object.keys));
+  for (const [code, table] of Object.entries(tables)) assert.ok(all.size - Object.keys(table).length <= 5, `${code} is missing sentences the others have`);
+});
+
+test('http: the language setting accepts a language code or "follow the browser"', async (t) => {
+  const { setupCode, client } = await serve(t);
+  const ann = client();
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  assert.equal((await ann.req('GET', '/api/state')).body.settings.language, '');
+  assert.equal((await ann.req('PUT', '/api/settings', { language: 'nb' })).body.settings.language, 'nb');
+  assert.equal((await ann.req('PUT', '/api/settings', { language: '<x>' })).body.settings.language, 'nb');
+  assert.equal((await ann.req('PUT', '/api/settings', { region: 'NO' })).body.settings.language, 'nb');
+  assert.equal((await ann.req('PUT', '/api/settings', { language: '' })).body.settings.language, '');
 });

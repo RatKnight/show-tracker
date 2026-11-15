@@ -1,8 +1,8 @@
 // Service worker: shows notifications sent by the server, and keeps a copy of
 // the app and of your last schedule so it still opens without a connection.
-const SHELL = 'st-shell-v2';
+const SHELL = 'st-shell-v3';
 const DATA = 'st-data-v1';
-const FILES = ['/', '/styles.css', '/js/app.js', '/js/core.js', '/js/changes.js', '/icon.svg', '/icon-192.png', '/manifest.webmanifest'];
+const FILES = ['/', '/styles.css', '/js/app.js', '/js/core.js', '/js/changes.js', '/js/i18n.js', '/icon.svg', '/icon-192.png', '/manifest.webmanifest'];
 // Signed-in answers worth keeping for offline use. Everything else under /api/ is live only.
 const KEPT = ['/api/session', '/api/state'];
 

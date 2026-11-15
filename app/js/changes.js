@@ -5,7 +5,16 @@
 // letter if there are two in a day; ids must sort upwards over time, since
 // "has this person seen it" is a comparison of ids. Write for someone using the
 // app, not for someone reading the code.
+//
+// Entries are written in English and shown in the reader's language when
+// app/js/lang/<code>.js has the same sentence; add the title and items there
+// too, or the entry appears in English.
 export const CHANGES = [
+  {
+    id: '2026-11-15',
+    title: 'Show Tracker in your language',
+    items: ['The app is now available in French, German, Norwegian, Spanish, Portuguese and Italian. It follows your browser’s language; to pick another, go to Settings → Language.', 'Titles of shows stay as the schedule sources list them.'],
+  },
   {
     id: '2026-11-13',
     title: 'Search everything, more to discover, notifications',

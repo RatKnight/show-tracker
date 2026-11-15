@@ -23,6 +23,7 @@ const settingsDefaults = () => ({
   autoTrackSeasons: true, // new seasons of tracked anime join the list by themselves
   cinemaAlerts: true, // tell me when an anime film gets a US cinema date
   tourDone: false, // the guided tour has been finished or skipped
+  language: '', // interface language code; '' follows the browser
   seenChanges: '', // the newest "what's new" entry this person has been shown
 });
 
