@@ -32,6 +32,8 @@ const TABLES = {
     'The site admin ({admin}) removed the passkeys and recovery codes from your account.': 'L’administrateur du site ({admin}) a supprimé les clés d’accès et les codes de récupération de votre compte.',
     'The site admin ({admin}) deleted your account.': 'L’administrateur du site ({admin}) a supprimé votre compte.',
     'If you asked for this, there is nothing to do. If you did not, get in touch with them.': 'Si vous l’avez demandé, il n’y a rien à faire. Sinon, contactez cette personne.',
+    "The site admin ({admin}) made you an admin of the site.": "L’administrateur du site ({admin}) vous a nommé administrateur du site.",
+    "The site admin ({admin}) removed your admin rights.": "L’administrateur du site ({admin}) vous a retiré vos droits d’administrateur.",
   },
   de: {
     'Episode {n}': 'Folge {n}',
@@ -62,6 +64,8 @@ const TABLES = {
     'The site admin ({admin}) removed the passkeys and recovery codes from your account.': 'Der Administrator der Seite ({admin}) hat die Passkeys und Wiederherstellungscodes aus deinem Konto entfernt.',
     'The site admin ({admin}) deleted your account.': 'Der Administrator der Seite ({admin}) hat dein Konto gelöscht.',
     'If you asked for this, there is nothing to do. If you did not, get in touch with them.': 'Wenn du darum gebeten hast, musst du nichts tun. Falls nicht, melde dich bei dieser Person.',
+    "The site admin ({admin}) made you an admin of the site.": "Der Administrator der Seite ({admin}) hat dich zum Administrator der Seite gemacht.",
+    "The site admin ({admin}) removed your admin rights.": "Der Administrator der Seite ({admin}) hat dir die Administratorrechte entzogen.",
   },
   nb: {
     'Episode {n}': 'Episode {n}',
@@ -92,6 +96,8 @@ const TABLES = {
     'The site admin ({admin}) removed the passkeys and recovery codes from your account.': 'Administratoren for nettstedet ({admin}) har fjernet passnøklene og gjenopprettingskodene fra kontoen din.',
     'The site admin ({admin}) deleted your account.': 'Administratoren for nettstedet ({admin}) har slettet kontoen din.',
     'If you asked for this, there is nothing to do. If you did not, get in touch with them.': 'Hvis du ba om dette, trenger du ikke gjøre noe. Hvis ikke, ta kontakt med vedkommende.',
+    "The site admin ({admin}) made you an admin of the site.": "Administratoren for nettstedet ({admin}) har gjort deg til administrator for nettstedet.",
+    "The site admin ({admin}) removed your admin rights.": "Administratoren for nettstedet ({admin}) har fjernet administratorrettighetene dine.",
   },
   es: {
     'Episode {n}': 'Episodio {n}',
@@ -122,6 +128,8 @@ const TABLES = {
     'The site admin ({admin}) removed the passkeys and recovery codes from your account.': 'El administrador del sitio ({admin}) ha quitado las llaves de acceso y los códigos de recuperación de tu cuenta.',
     'The site admin ({admin}) deleted your account.': 'El administrador del sitio ({admin}) ha eliminado tu cuenta.',
     'If you asked for this, there is nothing to do. If you did not, get in touch with them.': 'Si lo pediste tú, no tienes que hacer nada. Si no, ponte en contacto con esa persona.',
+    "The site admin ({admin}) made you an admin of the site.": "El administrador del sitio ({admin}) te ha hecho administrador del sitio.",
+    "The site admin ({admin}) removed your admin rights.": "El administrador del sitio ({admin}) te ha retirado los derechos de administrador.",
   },
   pt: {
     'Episode {n}': 'Episódio {n}',
@@ -152,6 +160,8 @@ const TABLES = {
     'The site admin ({admin}) removed the passkeys and recovery codes from your account.': 'O administrador do site ({admin}) removeu as chaves de acesso e os códigos de recuperação da sua conta.',
     'The site admin ({admin}) deleted your account.': 'O administrador do site ({admin}) excluiu a sua conta.',
     'If you asked for this, there is nothing to do. If you did not, get in touch with them.': 'Se você pediu isso, não precisa fazer nada. Caso contrário, entre em contato com essa pessoa.',
+    "The site admin ({admin}) made you an admin of the site.": "O administrador do site ({admin}) tornou você administrador do site.",
+    "The site admin ({admin}) removed your admin rights.": "O administrador do site ({admin}) removeu seus direitos de administrador.",
   },
   it: {
     'Episode {n}': 'Episodio {n}',
@@ -182,6 +192,8 @@ const TABLES = {
     'The site admin ({admin}) removed the passkeys and recovery codes from your account.': 'L’amministratore del sito ({admin}) ha rimosso le passkey e i codici di recupero dal tuo account.',
     'The site admin ({admin}) deleted your account.': 'L’amministratore del sito ({admin}) ha eliminato il tuo account.',
     'If you asked for this, there is nothing to do. If you did not, get in touch with them.': 'Se l’hai chiesto tu, non devi fare nulla. In caso contrario, contatta questa persona.',
+    "The site admin ({admin}) made you an admin of the site.": "L’amministratore del sito ({admin}) ti ha reso amministratore del sito.",
+    "The site admin ({admin}) removed your admin rights.": "L’amministratore del sito ({admin}) ha rimosso i tuoi diritti di amministratore.",
   },
 };
 

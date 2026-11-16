@@ -5,7 +5,7 @@ import { DAY, SERVICES, nextEpisode, episodesBetween, myStreams, dayKey, monthGr
 // ---------------------------------------------------------------- state
 
 // Everything lives on the server; this is the copy last fetched from it.
-let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], progress: {}, muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [], pushDevices: [] }, pushKey: '', mail: false, movies: false, dubs: false };
+let state = { shows: {}, alerts: [], settings: { services: [], ntfyUrl: '', discordWebhook: '' }, lastRefresh: 0, lastError: null, feedToken: '', shareToken: null, watched: [], progress: {}, muted: [], series: {}, me: { username: '', admin: false, email: '', pendingEmail: null, passkeys: [], recoveryCodesLeft: 0, apiTokens: [], pushDevices: [], canInvite: false }, pushKey: '', mail: false, movies: false, dubs: false };
 const ui = {
   tab: 'upcoming',
   added: new Set(), // keys of Discover tiles tracked during this visit
@@ -1299,6 +1299,67 @@ function pushSection(say) {
   );
 }
 
+/** For someone the admin allowed to invite people: make links, and see and remove their own. */
+function inviteSection() {
+  load('myInvites', async () => (ui.myInvites = (await call('GET', '/api/invites')).invites));
+  const note = h('input', { type: 'text', id: 'my-invite-note', maxlength: 60, autocomplete: 'off' });
+  const uses = h('select', { id: 'my-invite-uses' }, [1, 2, 5].map((n) => h('option', { value: n }, n === 1 ? 'One person' : T`Up to ${n} people`)));
+  const out = h('p', { class: 'error small', role: 'alert' });
+  const adopt = (r) => {
+    ui.myInvites = r.invites;
+    render();
+  };
+  const fail = (e) => (out.textContent = e.message);
+  const list = ui.myInvites || [];
+  return h(
+    'section',
+    {},
+    h('h2', {}, 'Invite people'),
+    h(
+      'div',
+      { class: 'card' },
+      h('p', { class: 'muted' }, 'You can invite people to this site. Each link lets someone create their own account; they will not see your list.'),
+      h('label', { class: 'field', for: 'my-invite-note' }, 'Note (optional, e.g. who it is for)', note),
+      h('label', { class: 'field', for: 'my-invite-uses' }, 'Who can use the link', uses),
+      h(
+        'div',
+        { class: 'actions' },
+        h(
+          'button',
+          {
+            class: 'btn primary',
+            type: 'button',
+            onclick: () =>
+              call('POST', '/api/invites', { note: note.value, uses: Number(uses.value) }).then((r) => {
+                ui.myNewInvite = `${location.origin}/#invite=${r.token}`;
+                adopt(r);
+              }, fail),
+          },
+          'Create an invite link',
+        ),
+      ),
+      out,
+      ui.myNewInvite && h('label', { class: 'field', for: 'my-new-invite' }, 'New invite link', h('input', { type: 'text', id: 'my-new-invite', readonly: true, value: ui.myNewInvite, onfocus: (e) => e.target.select() })),
+      ui.myNewInvite && h('p', { class: 'muted small' }, 'Copy it now: it will not be shown again. It works for 7 days.'),
+      h('h3', { class: 'sub-head' }, 'Your unused invite links'),
+      list.length
+        ? h(
+            'div',
+            { class: 'list' },
+            list.map((inv) =>
+              h(
+                'div',
+                { class: 'row' },
+                h('div', { class: 'body' }, h('div', { class: 'title' }, inv.note || 'Invite'), h('div', { class: 'sub' }, T`${inv.uses - inv.used} of ${inv.uses} places left · expires ${fmtShortDay.format(inv.expiresAt)}`)),
+                h('div', { class: 'side' }, h('button', { class: 'btn quiet', type: 'button', onclick: () => ask('Remove this invite? Its link will stop working.') && call('DELETE', `/api/invites?id=${inv.id}`).then(adopt, fail) }, 'Remove')),
+              ),
+            ),
+          )
+        : h('p', { class: 'muted small' }, 'None right now.'),
+    ),
+  );
+}
+
 function viewProfile() {
   const s = state.settings;
   return [
@@ -1575,6 +1636,7 @@ function viewProfile() {
         );
       })(),
     )]),
+    ...(state.me.canInvite && !state.me.admin ? [inviteSection()] : []),
     h(
       'section',
       {},
@@ -1756,7 +1818,34 @@ function viewAdmin() {
               h(
                 'div',
                 { class: 'row' },
-                h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, T`Joined ${fmtShortDay.format(p.createdAt)} · ${p.mfa ? 'passkey on' : 'no passkey'}`)),
+                h('div', { class: 'body' }, h('div', { class: 'title' }, p.username, p.admin ? ' (admin)' : ''), h('div', { class: 'sub' }, T`Joined ${fmtShortDay.format(p.createdAt)} · ${p.mfa ? 'passkey on' : 'no passkey'}`),
+                  // What this account may do. Your own admin box is fixed: another admin has to change it.
+                  h(
+                    'div',
+                    { class: 'checks' },
+                    h(
+                      'label',
+                      {},
+                      h('input', {
+                        type: 'checkbox',
+                        checked: p.admin,
+                        disabled: p.id === ui.session?.me?.id,
+                        onchange: (e) => {
+                          const on = e.target.checked;
+                          if (!ask(on ? `Make ${p.username} an admin? They will be able to manage every account, including yours.` : `Remove ${p.username}’s admin rights?`)) return void (e.target.checked = !on);
+                          call('POST', '/api/admin/role', { id: p.id, admin: on }).then((view) => ((ui.admin = view), render()), fail);
+                        },
+                      }),
+                      'Admin',
+                    ),
+                    h(
+                      'label',
+                      {},
+                      h('input', { type: 'checkbox', checked: p.admin || p.canInvite, disabled: p.admin, onchange: (e) => call('POST', '/api/admin/role', { id: p.id, canInvite: e.target.checked }).then((view) => ((ui.admin = view), render()), fail) }),
+                      'Can invite people',
+                    ),
+                  ),
+                ),
                 h(
                   'div',
                   { class: 'side' },
@@ -1849,7 +1938,7 @@ function viewAdmin() {
                     h(
                       'div',
                       { class: 'body' },
-                      h('div', { class: 'title' }, inv.note || 'Invite'),
+                      h('div', { class: 'title' }, inv.note || 'Invite', inv.by && inv.by !== state.me.username ? ` · ${inv.by}` : ''),
                       h('div', { class: 'sub' }, T`${inv.createdAt ? T`Created ${fmtShortDay.format(inv.createdAt)} · ` : ''}expires ${fmtShortDay.format(inv.expiresAt)}` + (inv.uses > 1 ? ` · ${inv.uses - inv.used} of ${inv.uses} places left` : '')),
                     ),
                     h(

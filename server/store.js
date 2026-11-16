@@ -41,6 +41,7 @@ export function makeUser(fields) {
     shareToken: null,
     email: '', // confirmed address for password recovery, optional
     pendingEmail: null, // { address, hash, expiresAt } until its link is clicked
+    canInvite: false, // may create invite links without being an admin
     endedSessions: [], // signed-out sessions whose cookies have not expired yet: { id: sha256 of the cookie, expiresAt }
     passkeys: [], // { id, name, publicKey, alg, signCount, transports, createdAt }
     recoveryCodes: [], // sha256 of each unused one-time code

@@ -708,7 +708,7 @@ test('http: accounts are isolated; invites, resets, sharing and admin limits', a
   assert.equal((await anon.req('POST', '/api/admin/invites')).status, 401);
   const invite = (await ann.req('POST', '/api/admin/invites')).body;
   assert.equal(invite.invites.length, 1);
-  assert.deepEqual(Object.keys(invite.invites[0]).sort(), ['createdAt', 'expiresAt', 'id', 'note', 'used', 'uses']);
+  assert.deepEqual(Object.keys(invite.invites[0]).sort(), ['by', 'createdAt', 'expiresAt', 'id', 'note', 'used', 'uses']);
   assert.ok(!JSON.stringify(invite.invites).includes(invite.token), 'the link itself is not listed');
   // A second invite, with a note, can be revoked before anyone uses it.
   const spare = (await ann.req('POST', '/api/admin/invites', { note: '  for Kira  ' })).body;
@@ -748,7 +748,7 @@ test('http: accounts are isolated; invites, resets, sharing and admin limits', a
   }
   const roster = (await ann.req('GET', '/api/admin/users')).body;
   assert.deepEqual(roster.users.map((x) => [x.username, x.admin]), [['ann', true], ['bob', false]]);
-  assert.deepEqual(Object.keys(roster.users[1]).sort(), ['admin', 'createdAt', 'id', 'mfa', 'username'], 'no list data in the admin view');
+  assert.deepEqual(Object.keys(roster.users[1]).sort(), ['admin', 'canInvite', 'createdAt', 'id', 'mfa', 'username'], 'no list data in the admin view');
   assert.equal(roster.encrypted, false);
 
   // Sharing is off until switched on, shows titles only, and can be withdrawn.
@@ -2017,4 +2017,57 @@ test('http: signing out ends the session itself; a group invite admits several p
   const one = (await other.req('POST', '/api/admin/invites')).body;
   assert.equal(one.invites.find((i) => i.uses === 1).used, 0);
   assert.equal((await other.req('POST', '/api/admin/invites', { uses: 5000 })).body.invites.some((i) => i.uses === 50), true);
+});
+
+test('http: permissions: an admin can let someone invite, or make them an admin; neither reaches further than given', async (t) => {
+  const { setupCode, client, store } = await serve(t);
+  const ann = client('198.51.100.1');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+  await ann.unlockAdmin('password-ann');
+  const join = async (inviter, path, name, ip) => {
+    const token = (await inviter.req('POST', path, {})).body.token;
+    const c = client(ip);
+    assert.equal((await c.req('POST', '/api/signup', { token, username: name, password: `password-${name}` })).status, 200);
+    return c;
+  };
+  const bob = await join(ann, '/api/admin/invites', 'bob', '198.51.100.2');
+  const idOf = (name) => Object.values(store.data.users).find((x) => x.username === name).id;
+
+  // Without permission: no invites, no admin.
+  assert.equal((await bob.req('GET', '/api/state')).body.me.canInvite, false);
+  assert.equal((await bob.req('POST', '/api/invites', {})).status, 403);
+  assert.equal((await bob.req('GET', '/api/invites')).status, 403);
+  assert.equal((await bob.req('POST', '/api/admin/role', { id: idOf('bob'), admin: true })).status, 403, 'nobody promotes themselves');
+
+  // Invite permission: own links only, small groups, and still not an admin.
+  const view = (await ann.req('POST', '/api/admin/role', { id: idOf('bob'), canInvite: true })).body;
+  assert.deepEqual(view.users.map((x) => [x.username, x.admin, x.canInvite]), [['ann', true, false], ['bob', false, true]]);
+  assert.equal((await bob.req('GET', '/api/state')).body.me.canInvite, true);
+  await ann.req('POST', '/api/admin/invites', { note: 'by ann' });
+  const made = (await bob.req('POST', '/api/invites', { note: 'for cy', uses: 40 })).body;
+  assert.deepEqual(made.invites.map((i) => [i.note, i.uses]), [['for cy', 5]], 'sees only their own; capped at five people');
+  assert.equal((await bob.req('GET', '/api/admin/users')).status, 403);
+  const annsInvite = (await ann.req('GET', '/api/admin/users')).body.invites.find((i) => i.note === 'by ann');
+  assert.equal((await bob.req('DELETE', `/api/invites?id=${annsInvite.id}`)).status, 400, 'cannot remove someone else’s');
+  assert.deepEqual((await ann.req('GET', '/api/admin/users')).body.invites.map((i) => [i.note, i.by]).sort(), [['by ann', 'ann'], ['for cy', 'bob']]);
+  const cy = client('198.51.100.3');
+  assert.equal((await cy.req('POST', '/api/signup', { token: made.token, username: 'cyd', password: 'password-cyd' })).status, 200);
+  assert.equal((await cy.req('GET', '/api/state')).body.me.canInvite, false, 'permission is not inherited');
+
+  // Taking the permission back also cancels the links they handed out.
+  await ann.req('POST', '/api/admin/role', { id: idOf('bob'), canInvite: false });
+  assert.equal((await bob.req('POST', '/api/invites', {})).status, 403);
+  assert.equal((await client('198.51.100.4').req('POST', '/api/signup', { token: made.token, username: 'dan', password: 'password-dan' })).status, 404);
+
+  // Admin: full access after confirming who they are, like any admin.
+  await ann.req('POST', '/api/admin/role', { id: idOf('bob'), admin: true });
+  assert.equal((await bob.req('GET', '/api/admin/users')).status, 403, 'still has to confirm it is them');
+  await bob.unlockAdmin('password-bob');
+  assert.equal((await bob.req('GET', '/api/admin/users')).status, 200);
+  assert.equal((await bob.req('GET', '/api/state')).body.me.canInvite, true);
+  // No one removes their own admin rights, so there is always an admin; another admin can.
+  assert.equal((await ann.req('POST', '/api/admin/role', { id: idOf('ann'), admin: false })).status, 400);
+  assert.equal((await bob.req('POST', '/api/admin/role', { id: idOf('ann'), admin: false })).status, 200);
+  assert.equal((await ann.req('GET', '/api/admin/users')).status, 403);
+  assert.equal((await bob.req('POST', '/api/admin/role', { id: 'u000000', admin: true })).status, 400);
 });
