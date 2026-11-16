@@ -112,6 +112,8 @@ function toast(message) {
 
 // ---------------------------------------------------------------- dom helpers
 
+/** Whether the browser extension is offered. Its server side is still there; this only hides it from the pages. */
+const EXTENSION = false;
 const SPOKEN = new Set(['title', 'placeholder', 'aria-label', 'alt']);
 /** ask(), in the person's language. */
 const ask = (question) => confirm(tr(question));
@@ -703,7 +705,7 @@ function viewWatchNext() {
       ),
     );
   }
-  out.push(h('p', { class: 'muted small' }, 'Counts cover episodes that have aired. For TV shows only the last 30 days are known. The browser extension fills in what you watch on Crunchyroll and HIDIVE.'));
+  out.push(h('p', { class: 'muted small' }, 'Counts cover episodes that have aired. For TV shows only the last 30 days are known.'));
   return out;
 }
 
@@ -1497,7 +1499,8 @@ function viewProfile() {
         );
       })(),
     ),
-    h(
+    // The browser extension is shelved for now: its settings stay out of sight until it is picked up again.
+    ...(!EXTENSION ? [] : [h(
       'section',
       {},
       h('h2', {}, 'Browser extension'),
@@ -1571,7 +1574,7 @@ function viewProfile() {
           out,
         );
       })(),
-    ),
+    )]),
     h(
       'section',
       {},
@@ -1739,7 +1742,8 @@ function viewAdmin() {
         };
         const fail = (e) => out.replaceChildren(h('p', { class: 'error small' }, e.message));
         const note = h('input', { type: 'text', id: 'invite-note', maxlength: 60, autocomplete: 'off', placeholder: 'e.g. Kira' });
-        if (ui.newInvite) setTimeout(() => showLink('New invite link', ui.newInvite, 'Works once, for 7 days. Copy it now: it will not be shown again.'));
+        const uses = h('select', { id: 'invite-uses' }, [1, 2, 5, 10, 25, 50].map((n) => h('option', { value: n }, n === 1 ? 'One person' : `Up to ${n} people`)));
+        if (ui.newInvite) setTimeout(() => showLink('New invite link', ui.newInvite, ui.newInviteUses > 1 ? `Works for up to ${ui.newInviteUses} people, for 7 days. Copy it now: it will not be shown again.` : 'Works once, for 7 days. Copy it now: it will not be shown again.'));
         return h(
           'div',
           { class: 'card' },
@@ -1809,6 +1813,8 @@ function viewAdmin() {
             ),
           ),
           h('label', { class: 'field', for: 'invite-note' }, 'Invite someone (optional note, e.g. who it is for)', note),
+          h('label', { class: 'field', for: 'invite-uses' }, 'Who can use the link', uses),
+          h('p', { class: 'muted small' }, 'A group link lets several people each create their own account with the same link. Anyone it is passed on to can use it too, until it runs out or you remove it.'),
           h(
             'div',
             { class: 'actions' },
@@ -1818,7 +1824,8 @@ function viewAdmin() {
                 class: 'btn primary',
                 type: 'button',
                 onclick: () =>
-                  call('POST', '/api/admin/invites', { note: note.value }).then((r) => {
+                  call('POST', '/api/admin/invites', { note: note.value, uses: Number(uses.value) }).then((r) => {
+                    ui.newInviteUses = Number(uses.value);
                     const { token, ...view } = r;
                     ui.admin = view;
                     // Keep the new link on screen through the re-render.
@@ -1843,7 +1850,7 @@ function viewAdmin() {
                       'div',
                       { class: 'body' },
                       h('div', { class: 'title' }, inv.note || 'Invite'),
-                      h('div', { class: 'sub' }, T`${inv.createdAt ? T`Created ${fmtShortDay.format(inv.createdAt)} · ` : ''}expires ${fmtShortDay.format(inv.expiresAt)}`),
+                      h('div', { class: 'sub' }, T`${inv.createdAt ? T`Created ${fmtShortDay.format(inv.createdAt)} · ` : ''}expires ${fmtShortDay.format(inv.expiresAt)}` + (inv.uses > 1 ? ` · ${inv.uses - inv.used} of ${inv.uses} places left` : '')),
                     ),
                     h(
                       'div',
@@ -2480,7 +2487,7 @@ const TOUR = [
   { tab: 'settings', title: 'Settings', text: 'Tell the app which streaming services you have and which country you are in, choose subtitled or dubbed releases, and send alerts to your phone or Discord. Changes save by themselves.' },
   { tab: 'admin', title: 'Admin', text: 'Only admins see this tab. Invite people, manage their accounts and check the site’s health. It asks you to confirm it is you once each time you sign in.' },
   { el: 'refresh-btn', title: 'Refresh', text: 'Schedules are checked for you around the clock. Use this when you want the latest right now.' },
-  { el: 'profile-btn', title: 'Your account', text: 'Your profile has your password, passkeys, e-mail address and the browser extension. Your list is private: nobody else can see it unless you create a share link there. This tour can be replayed from this menu.' },
+  { el: 'profile-btn', title: 'Your account', text: 'Your profile has your password, passkeys and e-mail address. Your list is private: nobody else can see it unless you create a share link there. This tour can be replayed from this menu.' },
   { title: 'You are set', text: 'Add your first show with the search box at the top, and the rest fills in by itself.' },
 ];
 const tour = { at: -1, steps: [], offered: false, returnTab: null, focusBack: null };

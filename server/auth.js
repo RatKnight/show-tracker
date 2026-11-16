@@ -73,7 +73,20 @@ export function sessionUser(cookieHeader, data, now = Date.now(), secure = false
   const [, id, expires, mac] = match;
   const user = Object.hasOwn(data.users, id) ? data.users[id] : null;
   if (!user || Number(expires) <= now) return null;
-  return safeEqual(mac, sign(data.secret, user, `${id}.${expires}`)) ? user : null;
+  if (!safeEqual(mac, sign(data.secret, user, `${id}.${expires}`))) return null;
+  // Signed out: the cookie is still correctly signed, but this session was ended.
+  return user.endedSessions.some((s) => s.id === tokenHash(match[0])) ? null : user;
+}
+
+/**
+ * End one sign-in session, so its cookie is refused from now on even if a copy
+ * of it survives somewhere. Remembered only until the cookie would have expired.
+ */
+export function endSession(user, cookieHeader, secure, now = Date.now()) {
+  const value = readCookie(cookieHeader, COOKIE, secure);
+  const expiresAt = Number(value.split('.')[1]);
+  if (!value || !(expiresAt > now)) return;
+  user.endedSessions = [...user.endedSessions.filter((s) => s.expiresAt > now && s.id !== tokenHash(value)), { id: tokenHash(value), expiresAt }].slice(-100);
 }
 
 // ---- second step of sign-in
