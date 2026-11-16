@@ -17,6 +17,7 @@ import {
   newToken,
   tokenHash,
   sessionCookie,
+  endSession,
   clearCookie,
   sessionUser,
   safeEqual,
@@ -197,8 +198,8 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     if (!mailer.enabled || !target?.email || target.id === admin.id) return;
     sendMail({
       to: target.email,
-      subject: 'A change was made to your Show Tracker account',
-      text: `Hi ${target.username},\n\nThe site admin (${admin.username}) ${what}.\n\nIf you asked for this, there is nothing to do. If you did not, get in touch with them.`,
+      subject: say(languageOf(target), 'A change was made to your Show Tracker account'),
+      text: [say(languageOf(target), 'Hi {name},', { name: target.username }), say(languageOf(target), what, { admin: admin.username }), say(languageOf(target), 'If you asked for this, there is nothing to do. If you did not, get in touch with them.')].join('\n\n'),
     });
   };
 
@@ -279,7 +280,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     // be shown again; the id is a short prefix of that hash, enough to revoke it.
     invites: Object.entries(data.invites)
       .filter(([, i]) => i.expiresAt > now())
-      .map(([hash, i]) => ({ id: hash.slice(0, 16), note: i.note || '', createdAt: i.createdAt || null, expiresAt: i.expiresAt }))
+      .map(([hash, i]) => ({ id: hash.slice(0, 16), note: i.note || '', createdAt: i.createdAt || null, expiresAt: i.expiresAt, uses: i.uses || 1, used: i.used || 0 }))
       .sort((a, b) => a.expiresAt - b.expiresAt),
   });
   /**
@@ -566,6 +567,11 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     }
 
     if (route === 'POST /api/logout') {
+      // Not just forgotten by this browser: the session itself stops working.
+      if (u) {
+        endSession(u, req.headers.cookie, secure, now());
+        store.save();
+      }
       res.setHeader('Set-Cookie', [...clearCookie(secure), ...clearPendingCookie(secure), ...clearAdminCookie(secure)]);
       return reply(200, { ok: true });
     }
@@ -594,7 +600,10 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       requirePassword(password);
       const user = makeUser({ username: requireUsername(username), auth: hashPassword(password), createdAt: now() });
       data.users[user.id] = user;
-      delete data.invites[tokenHash(token)];
+      // An ordinary invite is spent by one account; a group invite counts down.
+      const invite = data.invites[tokenHash(token)];
+      invite.used = (invite.used || 0) + 1;
+      if (invite.used >= (invite.uses || 1)) delete data.invites[tokenHash(token)];
       store.save();
       return reply(200, { ok: true }, signIn(user));
     }
@@ -733,8 +742,10 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           const body = req.headers['content-type'] ? await readJson(req) : {};
           const note = typeof body.note === 'string' ? body.note.trim().slice(0, 60) : '';
           if (Object.keys(data.invites).length >= 100) throw new HttpError(400, 'Too many unused invites. Remove some first.');
+          // How many accounts the link may create: one unless a group invite is asked for.
+          const uses = Number.isInteger(body.uses) ? Math.min(50, Math.max(1, body.uses)) : 1;
           const token = newToken();
-          data.invites[tokenHash(token)] = { note, createdAt: now(), expiresAt: now() + 7 * DAY_MS };
+          data.invites[tokenHash(token)] = { note, createdAt: now(), expiresAt: now() + 7 * DAY_MS, uses, used: 0 };
           store.save();
           return reply(200, { token, ...adminView() });
         }
@@ -754,7 +765,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           const token = newToken();
           data.resets[tokenHash(token)] = { userId: id, expiresAt: now() + DAY_MS };
           store.save();
-          tellOwner(data.users[id], u, 'created a password reset link for your account');
+          tellOwner(data.users[id], u, 'The site admin ({admin}) created a password reset link for your account.');
           return reply(200, { token });
         }
 
@@ -764,7 +775,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           if (id === u.id) throw new HttpError(400, 'Remove your own passkeys under Security instead.');
           clearMfa(data.users[id]);
           store.save();
-          tellOwner(data.users[id], u, 'removed the passkeys and recovery codes from your account');
+          tellOwner(data.users[id], u, 'The site admin ({admin}) removed the passkeys and recovery codes from your account.');
           return reply(200, adminView());
         }
 
@@ -772,7 +783,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           const id = url.searchParams.get('id') || '';
           if (!Object.hasOwn(data.users, id)) throw new HttpError(400, 'Unknown user.');
           if (id === u.id) throw new HttpError(400, 'You cannot delete your own account here.');
-          tellOwner(data.users[id], u, 'deleted your account');
+          tellOwner(data.users[id], u, 'The site admin ({admin}) deleted your account.');
           tracker.removeUser(id);
           return reply(200, adminView());
         }

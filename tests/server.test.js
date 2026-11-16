@@ -708,7 +708,7 @@ test('http: accounts are isolated; invites, resets, sharing and admin limits', a
   assert.equal((await anon.req('POST', '/api/admin/invites')).status, 401);
   const invite = (await ann.req('POST', '/api/admin/invites')).body;
   assert.equal(invite.invites.length, 1);
-  assert.deepEqual(Object.keys(invite.invites[0]).sort(), ['createdAt', 'expiresAt', 'id', 'note']);
+  assert.deepEqual(Object.keys(invite.invites[0]).sort(), ['createdAt', 'expiresAt', 'id', 'note', 'used', 'uses']);
   assert.ok(!JSON.stringify(invite.invites).includes(invite.token), 'the link itself is not listed');
   // A second invite, with a note, can be revoked before anyone uses it.
   const spare = (await ann.req('POST', '/api/admin/invites', { note: '  for Kira  ' })).body;
@@ -1977,4 +1977,44 @@ test('alerts and e-mails are written in the reader’s language', async (t) => {
   await ann.req('POST', '/api/test-alert');
   assert.equal(pushed.at(-1).body, 'Test alert — delivery is working.');
   assert.equal((await ann.req('PUT', '/api/settings', { uiLanguage: 'nonsense' })).body.settings.uiLanguage, 'it');
+});
+
+test('http: signing out ends the session itself; a group invite admits several people and then stops', async (t) => {
+  const { setupCode, client, store } = await serve(t);
+  const ann = client('198.51.100.1');
+  await ann.req('POST', '/api/setup', { username: 'ann', password: 'password-ann', code: setupCode });
+
+  // A copy of the cookie (another tab, or one that was stolen) stops working at sign-out.
+  const copy = client('198.51.100.1');
+  copy.cookie = ann.cookie;
+  const other = client('198.51.100.9');
+  assert.equal((await other.req('POST', '/api/login', { username: 'ann', password: 'password-ann' })).status, 200);
+  assert.equal((await copy.req('GET', '/api/state')).status, 200);
+  assert.equal((await ann.req('POST', '/api/logout')).status, 200);
+  assert.equal((await copy.req('GET', '/api/state')).status, 401, 'the signed-out session is refused');
+  assert.equal((await other.req('GET', '/api/state')).status, 200, 'other devices stay signed in');
+  const admin = Object.values(store.data.users)[0];
+  assert.equal(admin.endedSessions.length, 1);
+  assert.ok(!JSON.stringify(admin.endedSessions).includes(copy.cookie.split('=')[1]), 'only a hash of the cookie is kept');
+  // Signing out without a session is harmless.
+  assert.equal((await client('198.51.100.8').req('POST', '/api/logout')).status, 200);
+
+  // Group invite for three people.
+  await other.unlockAdmin('password-ann');
+  const made = (await other.req('POST', '/api/admin/invites', { note: 'Film club', uses: 3 })).body;
+  assert.deepEqual(made.invites.map((i) => [i.note, i.uses, i.used]), [['Film club', 3, 0]]);
+  for (const [n, name] of ['bea', 'cal', 'dee'].entries()) {
+    assert.equal((await client(`198.51.100.${20 + n}`).req('POST', '/api/signup', { token: made.token, username: name, password: `password-${name}` })).status, 200, name);
+    const left = (await other.req('GET', '/api/admin/users')).body.invites;
+    assert.deepEqual(left.map((i) => i.used), n < 2 ? [n + 1] : [], 'counts down, then is gone');
+  }
+  assert.equal((await client('198.51.100.30').req('POST', '/api/signup', { token: made.token, username: 'eve', password: 'password-eve' })).status, 404, 'a fourth person is refused');
+  // A failed sign-up (name taken) does not use up a place.
+  const two = (await other.req('POST', '/api/admin/invites', { uses: 2 })).body.token;
+  assert.equal((await client('198.51.100.31').req('POST', '/api/signup', { token: two, username: 'bea', password: 'password-bea2' })).status, 409);
+  assert.deepEqual((await other.req('GET', '/api/admin/users')).body.invites.map((i) => i.used), [0]);
+  // An ordinary invite still works once; silly sizes are brought into range.
+  const one = (await other.req('POST', '/api/admin/invites')).body;
+  assert.equal(one.invites.find((i) => i.uses === 1).used, 0);
+  assert.equal((await other.req('POST', '/api/admin/invites', { uses: 5000 })).body.invites.some((i) => i.uses === 50), true);
 });
