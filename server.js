@@ -227,6 +227,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
       id: u.id,
       username: u.username,
       admin: u.admin,
+      canInvite: u.admin || u.canInvite,
       email: u.email,
       pendingEmail: u.pendingEmail?.expiresAt > now() ? u.pendingEmail.address : null,
       passkeys: u.passkeys.map((k) => ({ id: k.id, name: k.name, createdAt: k.createdAt })),
@@ -267,6 +268,24 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     };
   };
   /** What an admin may know about the accounts: names and dates, never lists. */
+  const inviteView = (hash, i) => ({ id: hash.slice(0, 16), note: i.note || '', createdAt: i.createdAt || null, expiresAt: i.expiresAt, uses: i.uses || 1, used: i.used || 0 });
+  /** Make an invite link for `by`, good for `uses` accounts. Returns the link's token (kept only as a hash). */
+  function createInvite(by, note, uses) {
+    const token = newToken();
+    data.invites[tokenHash(token)] = { note: typeof note === 'string' ? note.trim().slice(0, 60) : '', createdAt: now(), expiresAt: now() + 7 * DAY_MS, uses, used: 0, by: by.id };
+    store.save();
+    return token;
+  }
+  /** The unused invites one person made (what someone with invite permission sees: their own, nobody else's). */
+  const invitesOf = (who) =>
+    Object.entries(data.invites)
+      .filter(([, i]) => i.by === who.id && i.expiresAt > now())
+      .map(([hash, i]) => inviteView(hash, i))
+      .sort((a, b) => a.expiresAt - b.expiresAt);
+  /** Links handed out by someone who may no longer invite stop working. */
+  const dropInvitesBy = (id) => {
+    for (const [hash, i] of Object.entries(data.invites)) if (i.by === id) delete data.invites[hash];
+  };
   const adminView = () => ({
     encrypted: store.encrypted,
     mail: mailer.enabled,
@@ -274,13 +293,13 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
     site: data.site,
     lastBackupEmail: data.lastBackupEmail || null,
     users: users()
-      .map((x) => ({ id: x.id, username: x.username, admin: x.admin, createdAt: x.createdAt, mfa: hasMfa(x) }))
+      .map((x) => ({ id: x.id, username: x.username, admin: x.admin, canInvite: x.canInvite, createdAt: x.createdAt, mfa: hasMfa(x) }))
       .sort((a, b) => a.createdAt - b.createdAt),
     // Unused invites. Only a hash of each link is kept, so the link itself cannot
     // be shown again; the id is a short prefix of that hash, enough to revoke it.
     invites: Object.entries(data.invites)
       .filter(([, i]) => i.expiresAt > now())
-      .map(([hash, i]) => ({ id: hash.slice(0, 16), note: i.note || '', createdAt: i.createdAt || null, expiresAt: i.expiresAt, uses: i.uses || 1, used: i.used || 0 }))
+      .map(([hash, i]) => ({ ...inviteView(hash, i), by: data.users[i.by]?.username || null }))
       .sort((a, b) => a.expiresAt - b.expiresAt),
   });
   /**
@@ -740,14 +759,10 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
 
         case 'POST /api/admin/invites': {
           const body = req.headers['content-type'] ? await readJson(req) : {};
-          const note = typeof body.note === 'string' ? body.note.trim().slice(0, 60) : '';
           if (Object.keys(data.invites).length >= 100) throw new HttpError(400, 'Too many unused invites. Remove some first.');
           // How many accounts the link may create: one unless a group invite is asked for.
           const uses = Number.isInteger(body.uses) ? Math.min(50, Math.max(1, body.uses)) : 1;
-          const token = newToken();
-          data.invites[tokenHash(token)] = { note, createdAt: now(), expiresAt: now() + 7 * DAY_MS, uses, used: 0 };
-          store.save();
-          return reply(200, { token, ...adminView() });
+          return reply(200, { token: createInvite(u, body.note, uses), ...adminView() });
         }
 
         case 'DELETE /api/admin/invites': {
@@ -755,6 +770,23 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           const hash = /^[0-9a-f]{16}$/.test(id) ? Object.keys(data.invites).find((h) => h.startsWith(id)) : null;
           if (!hash) throw new HttpError(400, 'Unknown invite.');
           delete data.invites[hash];
+          store.save();
+          return reply(200, adminView());
+        }
+
+        // What an account may do: be an admin, or just hand out invites.
+        case 'POST /api/admin/role': {
+          const body = await readJson(req);
+          const target = typeof body.id === 'string' && Object.hasOwn(data.users, body.id) ? data.users[body.id] : null;
+          if (!target) throw new HttpError(400, 'Unknown user.');
+          if (typeof body.admin === 'boolean' && body.admin !== target.admin) {
+            // Nobody takes their own admin rights away: that way the site always keeps at least one admin.
+            if (target.id === u.id) throw new HttpError(400, 'You cannot remove your own admin rights. Another admin can.');
+            target.admin = body.admin;
+            tellOwner(target, u, body.admin ? 'The site admin ({admin}) made you an admin of the site.' : 'The site admin ({admin}) removed your admin rights.');
+          }
+          if (typeof body.canInvite === 'boolean') target.canInvite = body.canInvite;
+          if (!target.admin && !target.canInvite) dropInvitesBy(target.id);
           store.save();
           return reply(200, adminView());
         }
@@ -784,6 +816,7 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
           if (!Object.hasOwn(data.users, id)) throw new HttpError(400, 'Unknown user.');
           if (id === u.id) throw new HttpError(400, 'You cannot delete your own account here.');
           tellOwner(data.users[id], u, 'The site admin ({admin}) deleted your account.');
+          dropInvitesBy(id);
           tracker.removeUser(id);
           return reply(200, adminView());
         }
@@ -1157,6 +1190,27 @@ export function createApp({ dataDir, dataKey = '', sources = liveSources, send =
         u.pushSubs = u.pushSubs.filter((s) => s.id !== id);
         store.save();
         return reply(200, publicState(u));
+      }
+
+      // Invite links made by someone who was given that permission (admins use the Admin tab).
+      case 'GET /api/invites':
+        if (!u.admin && !u.canInvite) throw new HttpError(403, 'You do not have permission to invite people.');
+        return reply(200, { invites: invitesOf(u) });
+      case 'POST /api/invites': {
+        if (!u.admin && !u.canInvite) throw new HttpError(403, 'You do not have permission to invite people.');
+        const body = await readJson(req);
+        if (invitesOf(u).length >= 10 || Object.keys(data.invites).length >= 100) throw new HttpError(400, 'Too many unused invites. Remove some first.');
+        // Small groups only: larger ones are for an admin to decide.
+        const uses = Number.isInteger(body.uses) ? Math.min(5, Math.max(1, body.uses)) : 1;
+        return reply(200, { token: createInvite(u, body.note, uses), invites: invitesOf(u) });
+      }
+      case 'DELETE /api/invites': {
+        const id = url.searchParams.get('id') || '';
+        const hash = /^[0-9a-f]{16}$/.test(id) ? Object.keys(data.invites).find((h) => h.startsWith(id) && data.invites[h].by === u.id) : null;
+        if (!hash) throw new HttpError(400, 'Unknown invite.');
+        delete data.invites[hash];
+        store.save();
+        return reply(200, { invites: invitesOf(u) });
       }
 
       case 'POST /api/test-alert': {
