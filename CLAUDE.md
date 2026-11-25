@@ -45,6 +45,12 @@ These were stated by the owner and still stand.
 - Environment variables set on the server: `DATA_KEY`, `PUBLIC_URL`, `TRUST_PROXY=1`,
   `TMDB_API_KEY`, `ANIMESCHEDULE_TOKEN`, `RESEND_API_KEY`, `MAIL_FROM`.
 - The log is quiet when things work. Failures are logged; successes mostly are not.
+- The panel's API token expired around 2026-11-25 (it was issued for 30 days), so
+  panel requests now get 401. Until the owner issues a new one, a deploy can only be
+  checked from outside: `https://shows.ratknight.com/healthz` and the served files.
+- When the panel's image scan reports "fix available upstream", set `PATCHED_ON` in
+  the `Dockerfile` to today's date and ship it. The build reuses its cached
+  `apk upgrade` step otherwise, so an ordinary deploy does not pick up the fix.
 
 ## How the pieces fit
 
@@ -142,8 +148,8 @@ Built and tested in simulation only. If the owner reports a problem, start here.
 
 - The owner still needs to rotate the server's SSH key. It was exposed in an earlier
   session's transcript. Remind them if it comes up; it is theirs to do.
-- The hosting panel's API token was created with broad scope and expires on its own.
-  The owner knows and is not concerned.
+- The hosting panel's API token (broad scope) has expired. A new one, if the owner
+  wants deploy checks again, should be read-only if the panel allows it.
 - Three BusyBox findings in the image scan have no upstream fix and are not reachable.
 - Ideas raised and not built: an agent on the server that looks for related shows
   using the owner's local model; Prime Video in the extension; a native Android shell
